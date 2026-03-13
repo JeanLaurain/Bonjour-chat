@@ -1,6 +1,7 @@
 <!--
   ChatLayout — Orchestrateur principal après connexion.
-  Gère les conversations DM + groupes, le WebSocket, les notifications.
+  Gère les conversations DM + groupes, le WebSocket, les notifications,
+  la pagination des messages et les réglages de groupe.
   Responsive : bascule sidebar/chat sur mobile.
 -->
 <script>
@@ -12,12 +13,14 @@
   import ChatWindow from './ChatWindow.svelte';
   import NewConversation from './NewConversation.svelte';
   import CreateGroup from './CreateGroup.svelte';
+  import GroupSettings from './GroupSettings.svelte';
 
   let conversations = [];
   let groupConversations = [];
   let messages = [];
   let showNewConv = false;
   let showNewGroup = false;
+  let showGroupSettings = false;
   let wsConn = null;
   let selectedUserId = null;
   let selectedGroupId = null;
@@ -25,6 +28,10 @@
   let mobileShowChat = false;
   let isMobile = false;
   let pollInterval;
+
+  // État de pagination
+  let hasMore = false;
+  let loadingMore = false;
 
   function checkMobile() { isMobile = window.innerWidth < 768; }
 
@@ -111,6 +118,15 @@
 
     if (data.type === 'group_created') loadGroups();
 
+    // Mise à jour en temps réel du nom de groupe
+    if (data.type === 'group_renamed') {
+      const { group_id, name } = data.data;
+      loadGroups();
+      if (convType === 'group' && selectedGroupId === group_id) {
+        currentConversation.update(c => c ? { ...c, username: name, group_name: name } : c);
+      }
+    }
+
     if (data.type === 'user_status') {
       onlineUsers.update(u => ({ ...u, [data.data.user_id]: data.data.online }));
     }
@@ -132,15 +148,63 @@
     } catch {}
   }
 
+  // Charge les 10 derniers messages d'un DM (pagination initiale)
   async function loadMessages(userId) {
-    try { messages = (await api.getConversation(userId)).messages || []; } catch { messages = []; }
+    try {
+      const data = await api.getConversation(userId);
+      messages = data.messages || [];
+      hasMore = data.has_more || false;
+    } catch {
+      messages = [];
+      hasMore = false;
+    }
   }
 
+  // Charge les 10 derniers messages d'un groupe (pagination initiale)
   async function loadGroupMessages(groupId) {
-    try { messages = (await api.getGroupMessages(groupId)).messages || []; } catch { messages = []; }
+    try {
+      const data = await api.getGroupMessages(groupId);
+      messages = data.messages || [];
+      hasMore = data.has_more || false;
+    } catch {
+      messages = [];
+      hasMore = false;
+    }
+  }
+
+  // Charge les messages plus anciens (scroll vers le haut)
+  async function handleLoadMore() {
+    if (loadingMore || !hasMore || messages.length === 0) return;
+    loadingMore = true;
+
+    // Le plus ancien message actuellement affiché
+    const oldestId = messages[0]?.id;
+    if (!oldestId) { loadingMore = false; return; }
+
+    try {
+      let data;
+      if (convType === 'dm' && selectedUserId) {
+        data = await api.getConversation(selectedUserId, oldestId);
+      } else if (convType === 'group' && selectedGroupId) {
+        data = await api.getGroupMessages(selectedGroupId, oldestId);
+      }
+      if (data) {
+        const older = data.messages || [];
+        messages = [...older, ...messages];
+        hasMore = data.has_more || false;
+      }
+    } catch {
+      // Silencieux en cas d'erreur
+    } finally {
+      loadingMore = false;
+    }
   }
 
   async function selectConversation(conv) {
+    // Reset pagination pour la nouvelle conversation
+    hasMore = false;
+    loadingMore = false;
+
     if (conv.type === 'group') {
       selectedGroupId = conv.group_id || conv.id;
       selectedUserId = null;
@@ -181,6 +245,7 @@
     selectedUserId = user.id;
     selectedGroupId = null;
     convType = 'dm';
+    hasMore = false;
     currentConversation.set({ type: 'dm', user_id: user.id, username: user.username, last_message: '', last_message_at: null, last_seen: user.last_seen });
     await loadMessages(user.id);
     loadConversations();
@@ -193,10 +258,17 @@
     selectedGroupId = group.id;
     selectedUserId = null;
     convType = 'group';
+    hasMore = false;
     currentConversation.set({ type: 'group', id: group.id, group_id: group.id, username: group.name, group_name: group.name, last_message: '', member_count: group.members?.length || 0 });
     messages = [];
     loadGroups();
     if (isMobile) mobileShowChat = true;
+  }
+
+  function handleGroupRenamed(e) {
+    const { name } = e.detail;
+    currentConversation.update(c => c ? { ...c, username: name, group_name: name } : c);
+    loadGroups();
   }
 
   function handleBack() { mobileShowChat = false; }
@@ -218,8 +290,12 @@
     <ChatWindow
       {messages}
       conversationType={convType}
+      {hasMore}
+      {loadingMore}
       on:send={handleSend}
       on:back={handleBack}
+      on:loadMore={handleLoadMore}
+      on:openGroupSettings={() => showGroupSettings = true}
     />
   </div>
 
@@ -228,5 +304,14 @@
   {/if}
   {#if showNewGroup}
     <CreateGroup on:created={handleGroupCreated} on:close={() => showNewGroup = false} />
+  {/if}
+  {#if showGroupSettings && selectedGroupId}
+    <GroupSettings
+      groupId={selectedGroupId}
+      groupName={$currentConversation?.group_name || ''}
+      on:renamed={handleGroupRenamed}
+      on:membersChanged={() => loadGroups()}
+      on:close={() => showGroupSettings = false}
+    />
   {/if}
 </div>

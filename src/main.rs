@@ -166,7 +166,7 @@ async fn main() {
         .route("/notifications/unsubscribe", post(handlers::notifications::unsubscribe_push))
         // --- Groupes de conversation ---
         .route("/groups", get(handlers::groups::list_groups).post(handlers::groups::create_group))
-        .route("/groups/:id", get(handlers::groups::get_group))
+        .route("/groups/:id", get(handlers::groups::get_group).put(handlers::groups::rename_group))
         .route("/groups/:id/messages", get(handlers::groups::get_group_messages).post(handlers::groups::send_group_message))
         .route("/groups/:id/members", post(handlers::groups::add_members))
         .route("/groups/:id/members/:user_id", delete(handlers::groups::remove_member))

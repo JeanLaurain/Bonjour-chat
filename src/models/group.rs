@@ -69,6 +69,13 @@ pub struct AddMembersRequest {
     pub user_ids: Vec<i32>,
 }
 
+/// Corps de requête pour renommer un groupe
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RenameGroupRequest {
+    /// Nouveau nom du groupe (1–100 caractères)
+    pub name: String,
+}
+
 /// Aperçu d'un groupe pour la liste des conversations
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
 pub struct GroupPreview {
@@ -155,6 +162,22 @@ pub async fn is_member(
     Ok(row > 0)
 }
 
+/// Renomme un groupe (chiffre le nouveau nom)
+pub async fn rename_group(
+    pool: &MySqlPool,
+    group_id: i32,
+    new_name: &str,
+    key: &[u8; 32],
+) -> Result<(), sqlx::Error> {
+    let encrypted_name = crypto::encrypt(new_name, key).unwrap_or_else(|_| new_name.to_string());
+    sqlx::query("UPDATE `groups` SET name = ? WHERE id = ?")
+        .bind(&encrypted_name)
+        .bind(group_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Liste les membres d'un groupe avec leurs noms d'utilisateur déchiffrés
 pub async fn get_members(
     pool: &MySqlPool,
@@ -215,23 +238,43 @@ pub async fn create_group_message(
     Ok(result.last_insert_id())
 }
 
-/// Récupère les messages d'un groupe, déchiffre le contenu et les noms d'expéditeur
+/// Récupère les messages d'un groupe avec pagination.
+/// Déchiffre le contenu et les noms d'expéditeur.
 pub async fn get_group_messages(
     pool: &MySqlPool,
     group_id: i32,
+    before_id: Option<i32>,
+    limit: i64,
     key: &[u8; 32],
 ) -> Result<Vec<GroupMessage>, sqlx::Error> {
-    let mut messages = sqlx::query_as::<_, GroupMessage>(
-        "SELECT gm.id, gm.group_id, gm.sender_id, u.username AS sender_username, \
-         gm.content, gm.message_type, gm.image_url, gm.created_at \
-         FROM group_messages gm \
-         JOIN users u ON u.id = gm.sender_id \
-         WHERE gm.group_id = ? \
-         ORDER BY gm.created_at ASC",
-    )
-    .bind(group_id)
-    .fetch_all(pool)
-    .await?;
+    let mut messages = if let Some(bid) = before_id {
+        sqlx::query_as::<_, GroupMessage>(
+            "SELECT gm.id, gm.group_id, gm.sender_id, u.username AS sender_username, \
+             gm.content, gm.message_type, gm.image_url, gm.created_at \
+             FROM group_messages gm \
+             JOIN users u ON u.id = gm.sender_id \
+             WHERE gm.group_id = ? AND gm.id < ? \
+             ORDER BY gm.id DESC LIMIT ?",
+        )
+        .bind(group_id).bind(bid).bind(limit)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, GroupMessage>(
+            "SELECT gm.id, gm.group_id, gm.sender_id, u.username AS sender_username, \
+             gm.content, gm.message_type, gm.image_url, gm.created_at \
+             FROM group_messages gm \
+             JOIN users u ON u.id = gm.sender_id \
+             WHERE gm.group_id = ? \
+             ORDER BY gm.id DESC LIMIT ?",
+        )
+        .bind(group_id).bind(limit)
+        .fetch_all(pool)
+        .await?
+    };
+
+    // Remettre dans l'ordre chronologique
+    messages.reverse();
 
     // Déchiffrer le contenu et le nom de l'expéditeur
     for msg in &mut messages {

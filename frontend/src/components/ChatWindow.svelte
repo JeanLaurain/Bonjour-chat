@@ -1,26 +1,57 @@
 <!--
   ChatWindow — Zone de conversation : en-tête, messages, zone de saisie.
-  Gère l'affichage des messages DM et de groupe, les images, les séparateurs de date.
+  Gère l'affichage des messages DM et de groupe, les images, les séparateurs de date,
+  la pagination par scroll infini vers le haut et l'accès aux réglages du groupe.
 -->
 <script>
-  import { createEventDispatcher, afterUpdate, tick } from 'svelte';
+  import { createEventDispatcher, afterUpdate, tick, onMount } from 'svelte';
   import { auth, currentConversation, onlineUsers } from '../lib/stores.js';
   import MessageInput from './MessageInput.svelte';
 
   export let messages = [];
   export let conversationType = null;
+  export let hasMore = false;
+  export let loadingMore = false;
 
   const dispatch = createEventDispatcher();
   let messagesEl;
   let prevLen = 0;
   let lightboxSrc = null;
+  let wasAtBottom = true;
 
-  afterUpdate(() => {
+  // Détecter le scroll en haut pour charger les messages plus anciens
+  function handleScroll() {
+    if (!messagesEl) return;
+    // Si on est en haut et qu'il reste des messages, émettre l'event
+    if (messagesEl.scrollTop < 50 && hasMore && !loadingMore) {
+      dispatch('loadMore');
+    }
+  }
+
+  afterUpdate(async () => {
     if (messages.length !== prevLen) {
+      const added = messages.length - prevLen;
+      const wasLoadingOlder = prevLen > 0 && added > 0 && !wasAtBottom;
       prevLen = messages.length;
-      tick().then(() => { messagesEl?.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' }); });
+      await tick();
+      if (messagesEl) {
+        if (wasLoadingOlder) {
+          // Quand on charge des messages plus anciens, maintenir la position de scroll
+          // Ne pas scroller vers le bas
+        } else {
+          // Nouveau message : scroller vers le bas
+          messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' });
+        }
+      }
     }
   });
+
+  // Suivre si on est en bas du scroll (pour auto-scroll sur nouveau message)
+  function trackScrollPosition() {
+    if (!messagesEl) return;
+    wasAtBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 100;
+    handleScroll();
+  }
 
   $: conv = $currentConversation;
   $: online = conv?.type === 'dm' && $onlineUsers[conv?.user_id];
@@ -41,7 +72,7 @@
     return new Date(ts).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
   }
 
-  // Groupement par date pour séparateurs
+  // Groupement par date pour séparateurs visuels
   function groupByDate(msgs) {
     const groups = [];
     let lastDate = null;
@@ -60,9 +91,7 @@
   }
 
   function getImageUrl(m) {
-    // Priorité à image_url si présent
     if (m.image_url) return m.image_url;
-    // Sinon vérifier si le contenu est une URL d'image uploadée
     if (m.message_type === 'image' && m.content) return m.content;
     return null;
   }
@@ -102,10 +131,39 @@
           {/if}
         </div>
       </div>
+
+      <!-- Bouton réglages du groupe -->
+      {#if conv.type === 'group'}
+        <button
+          on:click={() => dispatch('openGroupSettings')}
+          class="text-slate-400 hover:text-white p-2 rounded-lg hover:bg-slate-700/50 transition-colors"
+          title="Réglages du groupe"
+        >
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/>
+          </svg>
+        </button>
+      {/if}
     </div>
 
-    <!-- Zone des messages avec scroll -->
-    <div bind:this={messagesEl} class="flex-1 overflow-y-auto px-4 md:px-6 py-4 space-y-1">
+    <!-- Zone des messages avec scroll et détection du haut -->
+    <div bind:this={messagesEl} on:scroll={trackScrollPosition} class="flex-1 overflow-y-auto px-4 md:px-6 py-4 space-y-1">
+      <!-- Indicateur de chargement des messages plus anciens -->
+      {#if loadingMore}
+        <div class="flex justify-center py-3">
+          <svg class="animate-spin h-5 w-5 text-primary-400" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+          </svg>
+        </div>
+      {:else if hasMore}
+        <div class="flex justify-center py-2">
+          <button on:click={() => dispatch('loadMore')} class="text-xs text-slate-500 hover:text-primary-400 transition-colors">
+            ↑ Charger les messages précédents
+          </button>
+        </div>
+      {/if}
+
       {#each grouped as item}
         {#if item.type === 'date'}
           <!-- Séparateur de date -->

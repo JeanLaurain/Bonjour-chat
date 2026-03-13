@@ -5,16 +5,26 @@
 //! est extraite des claims JWT pour chaque requête.
 
 use axum::{
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::header,
     Json,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::config::AppState;
 use crate::errors::{AppError, ConversationResponse, ConversationsListResponse, ErrorResponse, SendMessageResponse};
 use crate::middleware::auth::{verify_token, Claims};
 use crate::models::{message, user};
+
+/// Paramètres de pagination pour les messages
+#[derive(Debug, Deserialize)]
+pub struct PaginationParams {
+    /// ID du message avant lequel charger (pour scroll infini)
+    pub before_id: Option<i32>,
+    /// Nombre de messages à charger (défaut: 10)
+    pub limit: Option<i64>,
+}
 
 /// Extrait les claims JWT depuis le header Authorization de la requête.
 /// Retourne une erreur `Unauthorized` si le header est absent ou le token invalide.
@@ -153,15 +163,20 @@ pub async fn send_message(
     })))
 }
 
-/// Récupère l'historique complet des messages échangés avec un utilisateur.
+/// Récupère les messages échangés avec un utilisateur (paginé).
 ///
-/// Les messages sont triés du plus ancien au plus récent.
-/// Inclut les messages envoyés ET reçus entre les deux utilisateurs.
+/// Par défaut, retourne les 10 derniers messages.
+/// Utiliser `?before_id=X` pour charger les messages plus anciens (scroll infini).
+/// Utiliser `?limit=N` pour contrôler le nombre de messages retournés.
 #[utoipa::path(
     get,
     path = "/conversations/{user_id}",
     tag = "Messages",
-    params(("user_id" = i32, Path, description = "ID de l'interlocuteur")),
+    params(
+        ("user_id" = i32, Path, description = "ID de l'interlocuteur"),
+        ("before_id" = Option<i32>, Query, description = "Charger les messages avant cet ID"),
+        ("limit" = Option<i64>, Query, description = "Nombre de messages (défaut: 10)")
+    ),
     security(("bearer_auth" = [])),
     responses(
         (status = 200, description = "Messages de la conversation", body = ConversationResponse),
@@ -172,6 +187,7 @@ pub async fn send_message(
 pub async fn get_conversation(
     State(state): State<AppState>,
     Path(other_user_id): Path<i32>,
+    Query(params): Query<PaginationParams>,
     req: Request,
 ) -> Result<Json<Value>, AppError> {
     let claims = extract_claims(&req, &state.jwt_secret)?;
@@ -181,12 +197,22 @@ pub async fn get_conversation(
         .await?
         .ok_or(AppError::UserNotFound)?;
 
-    // Récupération de tous les messages entre les deux utilisateurs (déchiffrés)
-    let messages = message::get_conversation(&state.db, claims.sub, other_user_id, &state.encryption_key).await?;
+    let limit = params.limit.unwrap_or(10).min(50).max(1);
+
+    // Récupération des messages paginés (déchiffrés)
+    let messages = message::get_conversation(
+        &state.db, claims.sub, other_user_id,
+        params.before_id, limit,
+        &state.encryption_key,
+    ).await?;
+
+    // has_more indique au frontend s'il reste des messages à charger
+    let has_more = messages.len() as i64 == limit;
 
     Ok(Json(json!({
         "conversation_with": other_user_id,
-        "messages": messages
+        "messages": messages,
+        "has_more": has_more
     })))
 }
 

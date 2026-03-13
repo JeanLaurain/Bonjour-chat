@@ -40,11 +40,11 @@ export const login = (username, password) =>
     body: JSON.stringify({ username, password }),
   });
 
-export const resetPassword = (username, email, newPassword) =>
+export const resetPassword = (username, recoveryCode, newPassword) =>
   request('/auth/reset-password', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, email, new_password: newPassword }),
+    body: JSON.stringify({ username, recovery_code: recoveryCode, new_password: newPassword }),
   });
 
 // ── Users ─────────────────────────────────────────────
@@ -67,8 +67,11 @@ export const sendMessage = (receiverId, content, messageType = 'text', imageUrl 
 export const listConversations = () =>
   request('/conversations', { headers: authHeaders() });
 
-export const getConversation = (userId) =>
-  request(`/conversations/${userId}`, { headers: authHeaders() });
+export const getConversation = (userId, beforeId = null) => {
+  let url = `/conversations/${userId}`;
+  if (beforeId) url += `?before_id=${beforeId}`;
+  return request(url, { headers: authHeaders() });
+};
 
 export const markAsRead = (userId) =>
   request(`/conversations/${userId}/read`, {
@@ -90,8 +93,11 @@ export const listGroups = () =>
 export const getGroup = (id) =>
   request(`/groups/${id}`, { headers: authHeaders() });
 
-export const getGroupMessages = (id) =>
-  request(`/groups/${id}/messages`, { headers: authHeaders() });
+export const getGroupMessages = (id, beforeId = null) => {
+  let url = `/groups/${id}/messages`;
+  if (beforeId) url += `?before_id=${beforeId}`;
+  return request(url, { headers: authHeaders() });
+};
 
 export const sendGroupMessage = (id, content, messageType = 'text', imageUrl = null) =>
   request(`/groups/${id}/messages`, {
@@ -111,6 +117,13 @@ export const removeGroupMember = (groupId, userId) =>
   request(`/groups/${groupId}/members/${userId}`, {
     method: 'DELETE',
     headers: authHeaders(),
+  });
+
+export const renameGroup = (id, name) =>
+  request(`/groups/${id}`, {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: JSON.stringify({ name }),
   });
 
 // ── Upload ────────────────────────────────────────────

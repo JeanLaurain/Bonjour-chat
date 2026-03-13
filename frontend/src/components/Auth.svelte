@@ -1,6 +1,7 @@
 <!--
   Auth — Page de connexion / inscription / réinitialisation de mot de passe.
   Trois modes : login, register, forgot.
+  Après inscription, le code de récupération est affiché une seule fois.
 -->
 <script>
   import { auth } from '../lib/stores.js';
@@ -11,9 +12,14 @@
   let email = '';
   let password = '';
   let newPassword = '';
+  let recoveryCode = '';
   let error = '';
   let success = '';
   let loading = false;
+
+  // Code de récupération affiché après inscription
+  let showRecoveryCode = false;
+  let generatedRecoveryCode = '';
 
   async function handleSubmit() {
     error = '';
@@ -22,9 +28,17 @@
     try {
       if (mode === 'register') {
         const data = await api.register(username, email, password);
-        auth.login(data.token, data.user);
+        // Afficher le code de récupération avant de connecter
+        if (data.recovery_code) {
+          generatedRecoveryCode = data.recovery_code;
+          showRecoveryCode = true;
+          // Stocker le token pour se connecter après
+          window._pendingAuth = { token: data.token, user: data.user };
+        } else {
+          auth.login(data.token, data.user);
+        }
       } else if (mode === 'forgot') {
-        await api.resetPassword(username, email, newPassword);
+        await api.resetPassword(username, recoveryCode, newPassword);
         success = 'Mot de passe réinitialisé ! Vous pouvez vous connecter.';
         setTimeout(() => { mode = 'login'; success = ''; }, 2000);
       } else {
@@ -38,13 +52,59 @@
     }
   }
 
+  function continueAfterRecovery() {
+    showRecoveryCode = false;
+    if (window._pendingAuth) {
+      auth.login(window._pendingAuth.token, window._pendingAuth.user);
+      delete window._pendingAuth;
+    }
+  }
+
+  function copyRecoveryCode() {
+    navigator.clipboard.writeText(generatedRecoveryCode);
+    success = 'Code copié !';
+    setTimeout(() => success = '', 2000);
+  }
+
   function switchMode(newMode) {
     mode = newMode;
     error = '';
     success = '';
+    recoveryCode = '';
   }
 </script>
 
+{#if showRecoveryCode}
+  <!-- Modal : code de récupération affiché une seule fois après inscription -->
+  <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-primary-900 to-slate-900 p-4">
+    <div class="relative w-full max-w-md animate-fade-in">
+      <div class="bg-slate-800/80 backdrop-blur-xl rounded-2xl shadow-2xl border border-slate-700/50 p-8 text-center">
+        <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-amber-500/20 text-amber-400 text-3xl mb-4">
+          🔑
+        </div>
+        <h2 class="text-xl font-bold text-white mb-2">Code de récupération</h2>
+        <p class="text-slate-400 text-sm mb-6">
+          Notez ce code en lieu sûr. Il est la <strong class="text-amber-400">seule façon</strong> de récupérer votre compte en cas d'oubli de mot de passe. Il ne sera <strong class="text-amber-400">plus jamais affiché</strong>.
+        </p>
+        <div class="bg-slate-900 rounded-xl p-4 mb-6 flex items-center justify-center gap-3">
+          <code class="text-2xl font-mono font-bold text-amber-400 tracking-wider">{generatedRecoveryCode}</code>
+          <button on:click={copyRecoveryCode} class="text-slate-400 hover:text-white transition-colors" title="Copier">
+            📋
+          </button>
+        </div>
+        {#if success}
+          <div class="text-green-400 text-sm mb-4">{success}</div>
+        {/if}
+        <button
+          on:click={continueAfterRecovery}
+          class="w-full py-3 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all duration-200 shadow-lg"
+        >
+          J'ai noté mon code, continuer
+        </button>
+      </div>
+    </div>
+  </div>
+{:else}
 <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-primary-900 to-slate-900 p-4">
   <!-- Cercles décoratifs d'arrière-plan -->
   <div class="absolute inset-0 overflow-hidden pointer-events-none">
@@ -89,7 +149,7 @@
             ← Retour à la connexion
           </button>
           <h2 class="text-lg font-semibold text-white mt-3">Réinitialiser le mot de passe</h2>
-          <p class="text-slate-400 text-sm mt-1">Entrez votre nom d'utilisateur et votre email pour vérifier votre identité.</p>
+          <p class="text-slate-400 text-sm mt-1">Entrez votre nom d'utilisateur et le code de récupération reçu lors de votre inscription.</p>
         </div>
       {/if}
 
@@ -111,7 +171,7 @@
           />
         </div>
 
-        {#if mode === 'register' || mode === 'forgot'}
+        {#if mode === 'register'}
           <div class="animate-slide-up">
             <label for="email" class="block text-sm font-medium text-slate-300 mb-1.5">
               Email
@@ -123,6 +183,25 @@
               placeholder="alice@example.com"
               required
               class="w-full px-4 py-3 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
+                     focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
+            />
+          </div>
+        {/if}
+
+        {#if mode === 'forgot'}
+          <div class="animate-slide-up">
+            <label for="recoveryCode" class="block text-sm font-medium text-slate-300 mb-1.5">
+              Code de récupération
+            </label>
+            <input
+              id="recoveryCode"
+              type="text"
+              bind:value={recoveryCode}
+              placeholder="ABCD1234"
+              required
+              minlength="8"
+              maxlength="8"
+              class="w-full px-4 py-3 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500 font-mono tracking-wider uppercase
                      focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
             />
           </div>
@@ -222,3 +301,4 @@
     </div>
   </div>
 </div>
+{/if}

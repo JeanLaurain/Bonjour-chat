@@ -4,16 +4,24 @@
 //! la gestion des membres, et la diffusion WebSocket aux membres.
 
 use axum::{
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::header,
     Json,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::config::AppState;
 use crate::errors::AppError;
 use crate::middleware::auth::{verify_token, Claims};
 use crate::models::group;
+
+/// Paramètres de pagination pour les messages de groupe
+#[derive(Debug, Deserialize)]
+pub struct PaginationParams {
+    pub before_id: Option<i32>,
+    pub limit: Option<i64>,
+}
 
 /// Extrait les claims JWT depuis les headers de la requête
 fn extract_claims(req: &Request, jwt_secret: &str) -> Result<Claims, AppError> {
@@ -116,8 +124,9 @@ pub async fn get_group(
     })))
 }
 
-/// GET /groups/:id/messages — Récupère tous les messages d'un groupe
-pub async fn get_group_messages(
+/// PUT /groups/:id — Renomme un groupe.
+/// Seul un membre du groupe peut le renommer.
+pub async fn rename_group(
     State(state): State<AppState>,
     Path(group_id): Path<i32>,
     req: Request,
@@ -128,8 +137,52 @@ pub async fn get_group_messages(
         return Err(AppError::Unauthorized);
     }
 
-    let messages = group::get_group_messages(&state.db, group_id, &state.encryption_key).await?;
-    Ok(Json(json!({ "messages": messages })))
+    let body = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+        .await
+        .map_err(|_| AppError::Validation("Invalid request body".to_string()))?;
+
+    let payload: group::RenameGroupRequest = serde_json::from_slice(&body)
+        .map_err(|_| AppError::Validation("Invalid JSON body".to_string()))?;
+
+    if payload.name.trim().is_empty() || payload.name.len() > 100 {
+        return Err(AppError::Validation(
+            "Group name must be between 1 and 100 characters".to_string(),
+        ));
+    }
+
+    group::rename_group(&state.db, group_id, &payload.name, &state.encryption_key).await?;
+
+    // Notifier les membres du changement de nom via WebSocket
+    let member_ids = group::get_member_ids(&state.db, group_id).await?;
+    let ws_msg = json!({
+        "type": "group_renamed",
+        "data": { "group_id": group_id, "name": payload.name }
+    }).to_string();
+    for member_id in &member_ids {
+        crate::handlers::ws::send_to_user(&state, *member_id, &ws_msg).await;
+    }
+
+    Ok(Json(json!({ "message": "Group renamed", "name": payload.name })))
+}
+
+/// GET /groups/:id/messages — Récupère les messages d'un groupe (paginé)
+pub async fn get_group_messages(
+    State(state): State<AppState>,
+    Path(group_id): Path<i32>,
+    Query(params): Query<PaginationParams>,
+    req: Request,
+) -> Result<Json<Value>, AppError> {
+    let claims = extract_claims(&req, &state.jwt_secret)?;
+
+    if !group::is_member(&state.db, group_id, claims.sub).await? {
+        return Err(AppError::Unauthorized);
+    }
+
+    let limit = params.limit.unwrap_or(10).min(50).max(1);
+    let messages = group::get_group_messages(&state.db, group_id, params.before_id, limit, &state.encryption_key).await?;
+    let has_more = messages.len() as i64 == limit;
+
+    Ok(Json(json!({ "messages": messages, "has_more": has_more })))
 }
 
 /// POST /groups/:id/messages — Envoie un message dans un groupe.

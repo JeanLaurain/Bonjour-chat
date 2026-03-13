@@ -60,7 +60,7 @@ pub async fn register(
     let password_hash = bcrypt::hash(&payload.password, bcrypt::DEFAULT_COST)?;
 
     // Insertion en base de données (username et email chiffrés)
-    let user_id = user::create_user(
+    let (user_id, recovery_code) = user::create_user(
         &state.db,
         &payload.username,
         &payload.email,
@@ -79,7 +79,8 @@ pub async fn register(
             "username": payload.username,
             "email": payload.email
         },
-        "token": token
+        "token": token,
+        "recovery_code": recovery_code
     })))
 }
 
@@ -125,11 +126,12 @@ pub async fn login(
     })))
 }
 
-/// Réinitialisation du mot de passe.
+/// Réinitialisation du mot de passe via code de récupération.
 ///
-/// L'utilisateur fournit son username, son email et un nouveau mot de passe.
-/// Le username et l'email doivent correspondre au même compte pour prouver
-/// que l'utilisateur est bien le propriétaire.
+/// L'utilisateur fournit son username et le code de récupération
+/// qu'il a reçu lors de son inscription. Ce code est secret et
+/// unique à chaque utilisateur, contrairement à l'email qui peut
+/// être deviné.
 #[utoipa::path(
     post,
     path = "/auth/reset-password",
@@ -138,6 +140,7 @@ pub async fn login(
     responses(
         (status = 200, description = "Mot de passe réinitialisé"),
         (status = 400, description = "Erreur de validation", body = ErrorResponse),
+        (status = 401, description = "Code de récupération invalide", body = ErrorResponse),
         (status = 404, description = "Utilisateur introuvable", body = ErrorResponse),
     )
 )]
@@ -156,11 +159,10 @@ pub async fn reset_password(
     let user_opt = user::find_by_username(&state.db, &payload.username, &state.encryption_key).await?;
     let user = user_opt.ok_or(AppError::UserNotFound)?;
 
-    // Vérification que l'email correspond (comparaison insensible à la casse)
-    if user.email.to_lowercase() != payload.email.to_lowercase() {
-        return Err(AppError::Validation(
-            "Username and email do not match".to_string(),
-        ));
+    // Vérification du code de récupération (comparaison par hash)
+    let code_valid = user::verify_recovery_code(&state.db, user.id, &payload.recovery_code).await?;
+    if !code_valid {
+        return Err(AppError::InvalidCredentials);
     }
 
     // Hash du nouveau mot de passe et mise à jour en base

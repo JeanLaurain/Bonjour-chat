@@ -54,15 +54,16 @@ pub struct LoginUser {
 }
 
 /// Corps de requête pour la réinitialisation du mot de passe.
-/// L'utilisateur doit fournir son username et email pour prouver qu'il est le propriétaire.
+/// L'utilisateur doit fournir son username et son code de récupération
+/// (reçu lors de l'inscription) pour prouver qu'il est le propriétaire.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ResetPasswordRequest {
     /// Nom d'utilisateur du compte
     #[schema(example = "alice")]
     pub username: String,
-    /// Email associé au compte (doit correspondre)
-    #[schema(example = "alice@example.com")]
-    pub email: String,
+    /// Code de récupération (8 caractères, reçu à l'inscription)
+    #[schema(example = "A1B2C3D4")]
+    pub recovery_code: String,
     /// Nouveau mot de passe (minimum 6 caractères)
     #[schema(example = "newpassword123", min_length = 6)]
     pub new_password: String,
@@ -106,32 +107,63 @@ fn decrypt_user_response(mut user: UserResponse, key: &[u8; 32]) -> UserResponse
     user
 }
 
-/// Insère un nouvel utilisateur en base et retourne son ID auto-incrémenté.
+/// Insère un nouvel utilisateur en base et retourne (ID, recovery_code).
 /// Le username et l'email sont chiffrés ; les hash sont stockés pour les lookups.
+/// Un code de récupération aléatoire de 8 caractères est généré et son hash SHA-256 stocké.
 pub async fn create_user(
     pool: &MySqlPool,
     username: &str,
     email: &str,
     password_hash: &str,
     key: &[u8; 32],
-) -> Result<u64, sqlx::Error> {
+) -> Result<(u64, String), sqlx::Error> {
     let encrypted_username = crypto::encrypt(username, key).unwrap_or_else(|_| username.to_string());
     let encrypted_email = crypto::encrypt(email, key).unwrap_or_else(|_| email.to_string());
     let username_hash = crypto::hash_value(username);
     let email_hash = crypto::hash_value(email);
 
+    // Générer un code de récupération de 8 caractères alphanumériques majuscules
+    let recovery_code = generate_recovery_code();
+    let recovery_code_hash = crypto::hash_value(&recovery_code);
+
     let result = sqlx::query(
-        "INSERT INTO users (username, email, password_hash, username_hash, email_hash) VALUES (?, ?, ?, ?, ?)"
+        "INSERT INTO users (username, email, password_hash, username_hash, email_hash, recovery_code_hash) VALUES (?, ?, ?, ?, ?, ?)"
     )
     .bind(&encrypted_username)
     .bind(&encrypted_email)
     .bind(password_hash)
     .bind(&username_hash)
     .bind(&email_hash)
+    .bind(&recovery_code_hash)
     .execute(pool)
     .await?;
 
-    Ok(result.last_insert_id())
+    Ok((result.last_insert_id(), recovery_code))
+}
+
+/// Génère un code de récupération aléatoire de 8 caractères (A-Z, 0-9)
+fn generate_recovery_code() -> String {
+    use rand::Rng;
+    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // sans I/O/1/0 pour éviter les confusions
+    let mut rng = rand::thread_rng();
+    (0..8).map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char).collect()
+}
+
+/// Vérifie le code de récupération d'un utilisateur en comparant les hash SHA-256
+pub async fn verify_recovery_code(
+    pool: &MySqlPool,
+    user_id: i32,
+    recovery_code: &str,
+) -> Result<bool, sqlx::Error> {
+    let code_hash = crypto::hash_value(&recovery_code.to_uppercase());
+    let row = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM users WHERE id = ? AND recovery_code_hash = ?"
+    )
+    .bind(user_id)
+    .bind(&code_hash)
+    .fetch_one(pool)
+    .await?;
+    Ok(row > 0)
 }
 
 /// Recherche un utilisateur par son nom d'utilisateur.

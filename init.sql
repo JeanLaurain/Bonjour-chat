@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash VARCHAR(255) NOT NULL,
     username_hash VARCHAR(64) DEFAULT NULL,
     email_hash VARCHAR(64) DEFAULT NULL,
+    recovery_code_hash VARCHAR(64) DEFAULT NULL,
     last_seen DATETIME DEFAULT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_username_hash (username_hash),
@@ -74,3 +75,6 @@ CREATE TABLE IF NOT EXISTS group_messages (
 
 CREATE INDEX idx_group_messages_group ON group_messages(group_id, created_at);
 CREATE INDEX idx_group_members_user ON group_members(user_id);
+
+-- Migration : ajouter recovery_code_hash si la colonne n'existe pas encore
+-- (MySQL n'a pas IF NOT EXISTS pour ALTER TABLE, ce sera ignoré si déjà présent lors de la création)

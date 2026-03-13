@@ -99,25 +99,45 @@ pub async fn create_message(
     Ok(result.last_insert_id())
 }
 
-/// Récupère tous les messages échangés entre deux utilisateurs,
-/// triés par date croissante. Déchiffre le contenu de chaque message.
+/// Récupère les messages échangés entre deux utilisateurs avec pagination.
+/// Si `before_id` est fourni, retourne les messages antérieurs à cet ID.
+/// `limit` contrôle le nombre de messages retournés (défaut 10).
 pub async fn get_conversation(
     pool: &MySqlPool,
     user_id: i32,
     other_user_id: i32,
+    before_id: Option<i32>,
+    limit: i64,
     key: &[u8; 32],
 ) -> Result<Vec<Message>, sqlx::Error> {
-    let mut messages = sqlx::query_as::<_, Message>(
-        "SELECT id, sender_id, receiver_id, content, message_type, image_url, is_read, created_at FROM messages \
-         WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?) \
-         ORDER BY created_at ASC"
-    )
-    .bind(user_id)
-    .bind(other_user_id)
-    .bind(other_user_id)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
+    let mut messages = if let Some(bid) = before_id {
+        // Charger les messages avant un ID donné (scroll vers le haut)
+        sqlx::query_as::<_, Message>(
+            "SELECT id, sender_id, receiver_id, content, message_type, image_url, is_read, created_at FROM messages \
+             WHERE ((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)) AND id < ? \
+             ORDER BY id DESC LIMIT ?"
+        )
+        .bind(user_id).bind(other_user_id)
+        .bind(other_user_id).bind(user_id)
+        .bind(bid).bind(limit)
+        .fetch_all(pool)
+        .await?
+    } else {
+        // Charger les N derniers messages
+        sqlx::query_as::<_, Message>(
+            "SELECT id, sender_id, receiver_id, content, message_type, image_url, is_read, created_at FROM messages \
+             WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?) \
+             ORDER BY id DESC LIMIT ?"
+        )
+        .bind(user_id).bind(other_user_id)
+        .bind(other_user_id).bind(user_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    };
+
+    // Remettre dans l'ordre chronologique (ASC) après le LIMIT DESC
+    messages.reverse();
 
     // Déchiffrer le contenu de chaque message
     for msg in &mut messages {
