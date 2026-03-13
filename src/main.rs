@@ -39,6 +39,7 @@ use crate::config::AppState;
     paths(
         handlers::auth::register,
         handlers::auth::login,
+        handlers::auth::reset_password,
         handlers::messages::send_message,
         handlers::messages::get_conversation,
         handlers::messages::list_conversations,
@@ -49,6 +50,7 @@ use crate::config::AppState;
     components(schemas(
         models::user::CreateUser,
         models::user::LoginUser,
+        models::user::ResetPasswordRequest,
         models::user::UserResponse,
         models::message::Message,
         models::message::CreateMessage,
@@ -150,6 +152,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/auth/register", post(handlers::auth::register))
         .route("/auth/login", post(handlers::auth::login))
+        .route("/auth/reset-password", post(handlers::auth::reset_password))
         // --- Endpoints protégés (JWT requis dans le header Authorization) ---
         .route("/messages", post(handlers::messages::send_message))
         .route("/conversations", get(handlers::messages::list_conversations))

@@ -1,25 +1,32 @@
 <!--
-  Auth — Page de connexion / inscription avec design moderne.
-  Toggle entre login et register via un onglet.
+  Auth — Page de connexion / inscription / réinitialisation de mot de passe.
+  Trois modes : login, register, forgot.
 -->
 <script>
   import { auth } from '../lib/stores.js';
   import * as api from '../lib/api.js';
 
-  let mode = 'login'; // 'login' | 'register'
+  let mode = 'login'; // 'login' | 'register' | 'forgot'
   let username = '';
   let email = '';
   let password = '';
+  let newPassword = '';
   let error = '';
+  let success = '';
   let loading = false;
 
   async function handleSubmit() {
     error = '';
+    success = '';
     loading = true;
     try {
       if (mode === 'register') {
         const data = await api.register(username, email, password);
         auth.login(data.token, data.user);
+      } else if (mode === 'forgot') {
+        await api.resetPassword(username, email, newPassword);
+        success = 'Mot de passe réinitialisé ! Vous pouvez vous connecter.';
+        setTimeout(() => { mode = 'login'; success = ''; }, 2000);
       } else {
         const data = await api.login(username, password);
         auth.login(data.token, data.user);
@@ -31,9 +38,10 @@
     }
   }
 
-  function toggleMode() {
-    mode = mode === 'login' ? 'register' : 'login';
+  function switchMode(newMode) {
+    mode = newMode;
     error = '';
+    success = '';
   }
 </script>
 
@@ -57,20 +65,33 @@
     <!-- Card -->
     <div class="bg-slate-800/80 backdrop-blur-xl rounded-2xl shadow-2xl border border-slate-700/50 p-8">
       <!-- Onglets Login / Register -->
-      <div class="flex rounded-xl bg-slate-900/50 p-1 mb-6">
-        <button
-          class="flex-1 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 {mode === 'login' ? 'bg-primary-500 text-white shadow-lg' : 'text-slate-400 hover:text-white'}"
-          on:click={() => { mode = 'login'; error = ''; }}
-        >
-          Connexion
-        </button>
-        <button
-          class="flex-1 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 {mode === 'register' ? 'bg-primary-500 text-white shadow-lg' : 'text-slate-400 hover:text-white'}"
-          on:click={() => { mode = 'register'; error = ''; }}
-        >
-          Inscription
-        </button>
-      </div>
+      {#if mode !== 'forgot'}
+        <div class="flex rounded-xl bg-slate-900/50 p-1 mb-6">
+          <button
+            class="flex-1 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 {mode === 'login' ? 'bg-primary-500 text-white shadow-lg' : 'text-slate-400 hover:text-white'}"
+            on:click={() => switchMode('login')}
+          >
+            Connexion
+          </button>
+          <button
+            class="flex-1 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 {mode === 'register' ? 'bg-primary-500 text-white shadow-lg' : 'text-slate-400 hover:text-white'}"
+            on:click={() => switchMode('register')}
+          >
+            Inscription
+          </button>
+        </div>
+      {:else}
+        <div class="mb-6">
+          <button
+            on:click={() => switchMode('login')}
+            class="text-slate-400 hover:text-white text-sm flex items-center gap-1 transition-colors"
+          >
+            ← Retour à la connexion
+          </button>
+          <h2 class="text-lg font-semibold text-white mt-3">Réinitialiser le mot de passe</h2>
+          <p class="text-slate-400 text-sm mt-1">Entrez votre nom d'utilisateur et votre email pour vérifier votre identité.</p>
+        </div>
+      {/if}
 
       <!-- Formulaire -->
       <form on:submit|preventDefault={handleSubmit} class="space-y-4">
@@ -90,7 +111,7 @@
           />
         </div>
 
-        {#if mode === 'register'}
+        {#if mode === 'register' || mode === 'forgot'}
           <div class="animate-slide-up">
             <label for="email" class="block text-sm font-medium text-slate-300 mb-1.5">
               Email
@@ -107,25 +128,49 @@
           </div>
         {/if}
 
-        <div>
-          <label for="password" class="block text-sm font-medium text-slate-300 mb-1.5">
-            Mot de passe
-          </label>
-          <input
-            id="password"
-            type="password"
-            bind:value={password}
-            placeholder="••••••"
-            required
-            minlength="6"
-            class="w-full px-4 py-3 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
-                   focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
-          />
-        </div>
+        {#if mode !== 'forgot'}
+          <div>
+            <label for="password" class="block text-sm font-medium text-slate-300 mb-1.5">
+              Mot de passe
+            </label>
+            <input
+              id="password"
+              type="password"
+              bind:value={password}
+              placeholder="••••••"
+              required
+              minlength="6"
+              class="w-full px-4 py-3 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
+                     focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
+            />
+          </div>
+        {:else}
+          <div class="animate-slide-up">
+            <label for="newPassword" class="block text-sm font-medium text-slate-300 mb-1.5">
+              Nouveau mot de passe
+            </label>
+            <input
+              id="newPassword"
+              type="password"
+              bind:value={newPassword}
+              placeholder="••••••"
+              required
+              minlength="6"
+              class="w-full px-4 py-3 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
+                     focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
+            />
+          </div>
+        {/if}
 
         {#if error}
           <div class="bg-red-500/10 border border-red-500/30 text-red-400 text-sm rounded-xl px-4 py-3 animate-fade-in">
             {error}
+          </div>
+        {/if}
+
+        {#if success}
+          <div class="bg-green-500/10 border border-green-500/30 text-green-400 text-sm rounded-xl px-4 py-3 animate-fade-in">
+            {success}
           </div>
         {/if}
 
@@ -141,19 +186,39 @@
               <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
               Chargement...
             </span>
+          {:else if mode === 'login'}
+            Se connecter
+          {:else if mode === 'register'}
+            S'inscrire
           {:else}
-            {mode === 'login' ? 'Se connecter' : "S'inscrire"}
+            Réinitialiser le mot de passe
           {/if}
         </button>
       </form>
 
-      <!-- Toggle link -->
-      <p class="text-center text-slate-400 text-sm mt-6">
-        {mode === 'login' ? 'Pas encore de compte ?' : 'Déjà un compte ?'}
-        <button on:click={toggleMode} class="text-primary-400 hover:text-primary-300 font-medium ml-1">
-          {mode === 'login' ? "S'inscrire" : 'Se connecter'}
-        </button>
-      </p>
+      <!-- Liens de navigation -->
+      <div class="text-center text-sm mt-6 space-y-2">
+        {#if mode === 'login'}
+          <p class="text-slate-400">
+            Pas encore de compte ?
+            <button on:click={() => switchMode('register')} class="text-primary-400 hover:text-primary-300 font-medium ml-1">
+              S'inscrire
+            </button>
+          </p>
+          <p>
+            <button on:click={() => switchMode('forgot')} class="text-slate-500 hover:text-slate-300 transition-colors">
+              Mot de passe oublié ?
+            </button>
+          </p>
+        {:else if mode === 'register'}
+          <p class="text-slate-400">
+            Déjà un compte ?
+            <button on:click={() => switchMode('login')} class="text-primary-400 hover:text-primary-300 font-medium ml-1">
+              Se connecter
+            </button>
+          </p>
+        {/if}
+      </div>
     </div>
   </div>
 </div>

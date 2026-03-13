@@ -40,6 +40,13 @@ export const login = (username, password) =>
     body: JSON.stringify({ username, password }),
   });
 
+export const resetPassword = (username, email, newPassword) =>
+  request('/auth/reset-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, email, new_password: newPassword }),
+  });
+
 // ── Users ─────────────────────────────────────────────
 export const searchUsers = (q) =>
   request(`/users/search?q=${encodeURIComponent(q)}`, { headers: authHeaders() });

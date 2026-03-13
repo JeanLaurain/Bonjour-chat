@@ -53,6 +53,21 @@ pub struct LoginUser {
     pub password: String,
 }
 
+/// Corps de requête pour la réinitialisation du mot de passe.
+/// L'utilisateur doit fournir son username et email pour prouver qu'il est le propriétaire.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ResetPasswordRequest {
+    /// Nom d'utilisateur du compte
+    #[schema(example = "alice")]
+    pub username: String,
+    /// Email associé au compte (doit correspondre)
+    #[schema(example = "alice@example.com")]
+    pub email: String,
+    /// Nouveau mot de passe (minimum 6 caractères)
+    #[schema(example = "newpassword123", min_length = 6)]
+    pub new_password: String,
+}
+
 /// Informations utilisateur renvoyées dans les réponses API
 /// (sans le hash du mot de passe)
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
@@ -241,4 +256,18 @@ pub async fn username_or_email_exists(
     .await?;
 
     Ok(row2.0 > 0)
+}
+
+/// Met à jour le mot de passe (hash bcrypt) d'un utilisateur.
+pub async fn update_password(
+    pool: &MySqlPool,
+    user_id: i32,
+    password_hash: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+        .bind(password_hash)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }

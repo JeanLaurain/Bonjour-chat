@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use crate::config::AppState;
 use crate::errors::{AppError, AuthResponse, ErrorResponse};
 use crate::middleware::auth::create_token;
-use crate::models::user::{self, CreateUser, LoginUser, UserResponse};
+use crate::models::user::{self, CreateUser, LoginUser, ResetPasswordRequest, UserResponse};
 
 /// Inscription d'un nouvel utilisateur.
 ///
@@ -122,5 +122,52 @@ pub async fn login(
         "message": "Login successful",
         "user": user_response,
         "token": token
+    })))
+}
+
+/// Réinitialisation du mot de passe.
+///
+/// L'utilisateur fournit son username, son email et un nouveau mot de passe.
+/// Le username et l'email doivent correspondre au même compte pour prouver
+/// que l'utilisateur est bien le propriétaire.
+#[utoipa::path(
+    post,
+    path = "/auth/reset-password",
+    tag = "Authentication",
+    request_body = ResetPasswordRequest,
+    responses(
+        (status = 200, description = "Mot de passe réinitialisé"),
+        (status = 400, description = "Erreur de validation", body = ErrorResponse),
+        (status = 404, description = "Utilisateur introuvable", body = ErrorResponse),
+    )
+)]
+pub async fn reset_password(
+    State(state): State<AppState>,
+    Json(payload): Json<ResetPasswordRequest>,
+) -> Result<Json<Value>, AppError> {
+    // Le nouveau mot de passe doit faire au moins 6 caractères
+    if payload.new_password.len() < 6 {
+        return Err(AppError::Validation(
+            "Password must be at least 6 characters".to_string(),
+        ));
+    }
+
+    // Recherche de l'utilisateur par username
+    let user_opt = user::find_by_username(&state.db, &payload.username, &state.encryption_key).await?;
+    let user = user_opt.ok_or(AppError::UserNotFound)?;
+
+    // Vérification que l'email correspond (comparaison insensible à la casse)
+    if user.email.to_lowercase() != payload.email.to_lowercase() {
+        return Err(AppError::Validation(
+            "Username and email do not match".to_string(),
+        ));
+    }
+
+    // Hash du nouveau mot de passe et mise à jour en base
+    let password_hash = bcrypt::hash(&payload.new_password, bcrypt::DEFAULT_COST)?;
+    user::update_password(&state.db, user.id, &password_hash).await?;
+
+    Ok(Json(json!({
+        "message": "Password reset successfully"
     })))
 }

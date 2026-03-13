@@ -67,7 +67,7 @@
          {collapsed ? 'w-[72px]' : 'w-80'}"
 >
   <!-- En-tête : Logo, titre, bouton collapse -->
-  <div class="flex items-center gap-3 px-4 py-4 border-b border-slate-700/50 flex-shrink-0">
+  <div class="flex items-center {collapsed ? 'flex-col gap-2 px-2 py-3' : 'gap-3 px-4 py-4'} border-b border-slate-700/50 flex-shrink-0">
     <div class="flex-shrink-0 w-10 h-10 rounded-xl bg-primary-500 flex items-center justify-center text-white text-lg">
       💬
     </div>

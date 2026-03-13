@@ -60,8 +60,10 @@
   }
 
   function getImageUrl(m) {
-    if (m.message_type === 'image' && m.image_url) return m.image_url;
-    if (m.message_type === 'image' && m.content?.startsWith('/uploads/')) return m.content;
+    // Priorité à image_url si présent
+    if (m.image_url) return m.image_url;
+    // Sinon vérifier si le contenu est une URL d'image uploadée
+    if (m.message_type === 'image' && m.content) return m.content;
     return null;
   }
 </script>
