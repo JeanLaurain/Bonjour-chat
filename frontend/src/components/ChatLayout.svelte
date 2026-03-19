@@ -178,8 +178,11 @@
     }
 
     if (data.type === 'ice_candidate' && (callState || activeCall)) {
-      // Les candidats ICE sont gérés par le CallModal
-      callState = callState ? { ...callState, newIceCandidate: data.candidate } : callState;
+      // Accumuler les candidats ICE dans un array (jamais en écraser)
+      if (callState) {
+        const candidates = [...(callState.iceCandidates || []), data.candidate];
+        callState = { ...callState, iceCandidates: candidates };
+      }
     }
 
     if (data.type === 'call_hangup' || data.type === 'call_reject' || data.type === 'call_busy') {

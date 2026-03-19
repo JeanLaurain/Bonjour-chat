@@ -24,6 +24,7 @@
   let remoteStream = null;
   let localVideo;
   let remoteVideo;
+  let remoteAudio; // Élément audio séparé pour les appels audio-only
   let status = 'initializing'; // initializing, ringing, connected, ended
   let duration = 0;
   let durationInterval;
@@ -31,8 +32,21 @@
   let videoEnabled = false;
   let ringtone;
 
+  // Buffer de candidats ICE reçus avant que la description distante ne soit définie
+  let candidateBuffer = [];
+  let remoteDescSet = false;
+  // Compteur pour suivre les candidats déjà traités depuis l'array
+  let processedCandidates = 0;
+
+  // Réactive : traiter la réponse SDP quand elle arrive (appel sortant)
   $: if (callState?.answer) handleRemoteAnswer(callState.answer);
-  $: if (callState?.newIceCandidate) handleRemoteIceCandidate(callState.newIceCandidate);
+
+  // Réactive : traiter les nouveaux candidats ICE (accumulés dans un array)
+  $: if (callState?.iceCandidates?.length > processedCandidates) {
+    const newOnes = callState.iceCandidates.slice(processedCandidates);
+    processedCandidates = callState.iceCandidates.length;
+    newOnes.forEach(c => handleRemoteIceCandidate(c));
+  }
 
   onMount(async () => {
     videoEnabled = callState?.video || false;
@@ -61,11 +75,13 @@
       // Ajouter les pistes locales
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
-      // Réception des pistes distantes
+      // Réception des pistes distantes (audio/vidéo)
       remoteStream = new MediaStream();
       pc.ontrack = (e) => {
-        e.streams[0].getTracks().forEach(track => remoteStream.addTrack(track));
+        remoteStream.addTrack(e.track);
+        // Connecter le flux aux éléments de lecture
         if (remoteVideo) remoteVideo.srcObject = remoteStream;
+        if (remoteAudio) remoteAudio.srcObject = remoteStream;
       };
 
       // Envoi des candidats ICE au pair distant
@@ -79,9 +95,24 @@
         }
       };
 
-      // Surveillance de l'état de la connexion
+      // Surveillance de l'état de la connexion ICE (plus fiable que connectionState)
+      pc.oniceconnectionstatechange = () => {
+        if (!pc) return;
+        const s = pc.iceConnectionState;
+        if ((s === 'connected' || s === 'completed') && status !== 'connected') {
+          status = 'connected';
+          dispatch('connected');
+          startDurationTimer();
+        }
+        if (s === 'failed' || s === 'closed') {
+          hangup();
+        }
+      };
+
+      // Surveillance supplémentaire via connectionState (browsers modernes)
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'connected') {
+        if (!pc) return;
+        if (pc.connectionState === 'connected' && status !== 'connected') {
           status = 'connected';
           dispatch('connected');
           startDurationTimer();
@@ -123,6 +154,10 @@
     if (!pc || !callState?.offer) return;
 
     await pc.setRemoteDescription(new RTCSessionDescription(callState.offer));
+    remoteDescSet = true;
+    // Appliquer les candidats ICE reçus pendant la phase de sonnerie
+    await flushCandidateBuffer();
+
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
 
@@ -150,15 +185,32 @@
     if (!pc || pc.signalingState !== 'have-local-offer') return;
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      remoteDescSet = true;
+      // Appliquer les candidats ICE reçus avant la réponse
+      await flushCandidateBuffer();
     } catch (e) { console.error('Erreur setRemoteDescription:', e); }
   }
 
-  /** Ajouter un candidat ICE distant */
+  /** Ajouter un candidat ICE distant (bufferisé si la description distante n'est pas encore définie) */
   async function handleRemoteIceCandidate(candidate) {
-    if (!pc) return;
+    if (!pc || !remoteDescSet) {
+      candidateBuffer.push(candidate);
+      return;
+    }
     try {
       await pc.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (e) { console.error('Erreur addIceCandidate:', e); }
+  }
+
+  /** Appliquer tous les candidats ICE en attente */
+  async function flushCandidateBuffer() {
+    const buffered = [...candidateBuffer];
+    candidateBuffer = [];
+    for (const c of buffered) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(c));
+      } catch (e) { console.error('Erreur flush ICE candidate:', e); }
+    }
   }
 
   /** Raccrocher / terminer l'appel */
@@ -260,18 +312,16 @@
     </p>
   </div>
 
-  <!-- Zone vidéo (si appel vidéo et connecté) -->
-  {#if videoEnabled && status === 'connected'}
-    <div class="relative w-full max-w-2xl aspect-video mb-8 rounded-2xl overflow-hidden bg-black">
-      <!-- Vidéo distante (plein cadre) -->
-      <video bind:this={remoteVideo} autoplay playsinline class="w-full h-full object-cover"></video>
-      <!-- Vidéo locale (miniature en bas à droite) -->
-      <video bind:this={localVideo} autoplay muted playsinline class="absolute bottom-3 right-3 w-32 h-24 rounded-lg object-cover border-2 border-white/20 shadow-lg"></video>
-    </div>
-  {:else}
-    <!-- Audio uniquement : vidéo locale cachée -->
-    <video bind:this={localVideo} autoplay muted playsinline class="hidden"></video>
-    <video bind:this={remoteVideo} autoplay playsinline class="hidden"></video>
+  <!-- Zone vidéo : les éléments existent toujours pour ne pas perdre srcObject -->
+  <div class="relative w-full max-w-2xl aspect-video mb-8 rounded-2xl overflow-hidden bg-black {videoEnabled && status === 'connected' ? '' : 'hidden'}">
+    <!-- Vidéo distante (plein cadre) -->
+    <video bind:this={remoteVideo} autoplay playsinline class="w-full h-full object-cover"></video>
+    <!-- Vidéo locale (miniature en bas à droite) -->
+    <video bind:this={localVideo} autoplay muted playsinline class="absolute bottom-3 right-3 w-32 h-24 rounded-lg object-cover border-2 border-white/20 shadow-lg"></video>
+  </div>
+  <!-- Éléments audio cachés quand pas en mode vidéo -->
+  {#if !(videoEnabled && status === 'connected')}
+    <audio bind:this={remoteAudio} autoplay class="hidden"></audio>
   {/if}
 
   <!-- Boutons de contrôle -->
