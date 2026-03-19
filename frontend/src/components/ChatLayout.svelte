@@ -16,6 +16,7 @@
   import GroupSettings from './GroupSettings.svelte';
   import CallModal from './CallModal.svelte';
   import ProfileModal from './ProfileModal.svelte';
+  import GroupCallPicker from './GroupCallPicker.svelte';
 
   let conversations = [];
   let groupConversations = [];
@@ -24,6 +25,7 @@
   let showNewGroup = false;
   let showGroupSettings = false;
   let showProfile = false;
+  let groupCallPicker = null; // null | { video: boolean }
   let wsConn = null;
   let selectedUserId = null;
   let selectedGroupId = null;
@@ -290,7 +292,7 @@
     replyTo = null;
   }
 
-  /** Démarrer un appel (audio ou vidéo) */
+  /** Démarrer un appel (audio ou vidéo) en DM */
   function handleStartCall(e) {
     if (activeCall || !selectedUserId) return;
     const { video } = e.detail;
@@ -300,6 +302,24 @@
       userId: selectedUserId,
       username: conv?.username || '',
       video: video || false,
+    };
+  }
+
+  /** Ouvrir le sélecteur de membre pour appeler depuis un groupe */
+  function handleGroupCall(e) {
+    if (activeCall) return;
+    groupCallPicker = { video: e.detail.video || false };
+  }
+
+  /** Un membre a été sélectionné dans le GroupCallPicker */
+  function handlePickMember(e) {
+    const { userId, username, video } = e.detail;
+    groupCallPicker = null;
+    callState = {
+      type: 'outgoing',
+      userId,
+      username,
+      video,
     };
   }
 
@@ -377,6 +397,7 @@
       on:reply={handleReply}
       on:clearReply={handleClearReply}
       on:startCall={handleStartCall}
+      on:groupCall={handleGroupCall}
     />
   </div>
 
@@ -409,5 +430,15 @@
   <!-- Modal de profil -->
   {#if showProfile}
     <ProfileModal on:close={() => showProfile = false} />
+  {/if}
+
+  <!-- Sélecteur de membre pour appel depuis un groupe -->
+  {#if groupCallPicker && selectedGroupId}
+    <GroupCallPicker
+      groupId={selectedGroupId}
+      video={groupCallPicker.video}
+      on:pick={handlePickMember}
+      on:close={() => groupCallPicker = null}
+    />
   {/if}
 </div>
