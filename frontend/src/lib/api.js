@@ -47,6 +47,18 @@ export const resetPassword = (username, recoveryCode, newPassword) =>
     body: JSON.stringify({ username, recovery_code: recoveryCode, new_password: newPassword }),
   });
 
+/** Récupère le profil de l'utilisateur connecté */
+export const getMe = () =>
+  request('/auth/me', { headers: authHeaders() });
+
+/** Met à jour la photo de profil (url issue de /upload, ou null pour supprimer) */
+export const updateProfile = (profilePictureUrl) =>
+  request('/auth/profile', {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: JSON.stringify({ profile_picture_url: profilePictureUrl }),
+  });
+
 // ── Users ─────────────────────────────────────────────
 export const searchUsers = (q) =>
   request(`/users/search?q=${encodeURIComponent(q)}`, { headers: authHeaders() });

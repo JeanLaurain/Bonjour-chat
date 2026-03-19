@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
     username_hash VARCHAR(64) DEFAULT NULL,
     email_hash VARCHAR(64) DEFAULT NULL,
     recovery_code_hash VARCHAR(64) DEFAULT NULL,
+    profile_picture_url VARCHAR(500) DEFAULT NULL,
     last_seen DATETIME DEFAULT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_username_hash (username_hash),

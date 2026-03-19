@@ -16,6 +16,14 @@ function createAuthStore() {
       localStorage.setItem('user', JSON.stringify(user));
       set({ token, user, isAuthenticated: true });
     },
+    /** Met à jour les données utilisateur (ex: après changement de photo de profil) */
+    updateUser: (userData) => {
+      const stored = JSON.parse(localStorage.getItem('user') || '{}');
+      const merged = { ...stored, ...userData };
+      localStorage.setItem('user', JSON.stringify(merged));
+      const token = localStorage.getItem('token');
+      set({ token, user: merged, isAuthenticated: !!token });
+    },
     logout: () => {
       localStorage.removeItem('token');
       localStorage.removeItem('user');
@@ -73,6 +81,10 @@ export function createWsConnection(token, onMessage) {
 
   connect();
   return {
+    /** Envoie un message JSON via le WebSocket (utilisé pour le signaling WebRTC) */
+    send: (data) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(typeof data === 'string' ? data : JSON.stringify(data)); },
+    /** Vérifie si le WebSocket est connecté */
+    get readyState() { return ws ? ws.readyState : WebSocket.CLOSED; },
     close: () => { intentionalClose = true; clearTimeout(reconnectTimer); ws?.close(); },
   };
 }

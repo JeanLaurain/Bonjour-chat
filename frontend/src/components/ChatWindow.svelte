@@ -163,13 +163,17 @@
       <!-- Avatar + info -->
       <div class="flex items-center gap-3 flex-1 min-w-0">
         <div class="relative">
-          <div class="w-9 h-9 rounded-full bg-primary-500 flex items-center justify-center text-white text-sm font-semibold">
-            {#if conv.type === 'group'}
-              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2"/><circle cx="9" cy="7" r="4"/></svg>
-            {:else}
-              {(conv.username || '?')[0].toUpperCase()}
-            {/if}
-          </div>
+          {#if conv.type === 'dm' && conv.profile_picture_url}
+            <img src={conv.profile_picture_url} alt="" class="w-9 h-9 rounded-full object-cover" />
+          {:else}
+            <div class="w-9 h-9 rounded-full bg-primary-500 flex items-center justify-center text-white text-sm font-semibold">
+              {#if conv.type === 'group'}
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2"/><circle cx="9" cy="7" r="4"/></svg>
+              {:else}
+                {(conv.username || '?')[0].toUpperCase()}
+              {/if}
+            </div>
+          {/if}
           {#if online}
             <div class="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-emerald-500 border-2 border-slate-800 rounded-full"></div>
           {/if}

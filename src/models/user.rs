@@ -22,6 +22,8 @@ pub struct User {
     pub email: String,
     #[serde(skip_serializing)]
     pub password_hash: String,
+    /// URL de la photo de profil (stockée dans /uploads/)
+    pub profile_picture_url: Option<String>,
     /// Date de dernière connexion (null si jamais connecté via WebSocket)
     pub last_seen: Option<NaiveDateTime>,
     pub created_at: NaiveDateTime,
@@ -76,6 +78,8 @@ pub struct UserResponse {
     pub id: i32,
     pub username: String,
     pub email: String,
+    /// URL de la photo de profil
+    pub profile_picture_url: Option<String>,
     pub last_seen: Option<NaiveDateTime>,
     pub created_at: NaiveDateTime,
 }
@@ -87,6 +91,7 @@ impl From<User> for UserResponse {
             id: u.id,
             username: u.username,
             email: u.email,
+            profile_picture_url: u.profile_picture_url,
             last_seen: u.last_seen,
             created_at: u.created_at,
         }
@@ -97,6 +102,7 @@ impl From<User> for UserResponse {
 fn decrypt_user(mut user: User, key: &[u8; 32]) -> User {
     user.username = crypto::try_decrypt(&user.username, key);
     user.email = crypto::try_decrypt(&user.email, key);
+    // profile_picture_url est stocké en clair (chemin de fichier)
     user
 }
 
@@ -177,7 +183,7 @@ pub async fn find_by_username(
 
     // D'abord chercher par hash (données chiffrées)
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, email, password_hash, last_seen, created_at FROM users WHERE username_hash = ?"
+        "SELECT id, username, email, password_hash, profile_picture_url, last_seen, created_at FROM users WHERE username_hash = ?"
     )
     .bind(&username_hash)
     .fetch_optional(pool)
@@ -189,7 +195,7 @@ pub async fn find_by_username(
 
     // Fallback : chercher par username en clair (anciennes données non chiffrées)
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, email, password_hash, last_seen, created_at FROM users WHERE username = ? AND username_hash IS NULL"
+        "SELECT id, username, email, password_hash, profile_picture_url, last_seen, created_at FROM users WHERE username = ? AND username_hash IS NULL"
     )
     .bind(username)
     .fetch_optional(pool)
@@ -206,7 +212,7 @@ pub async fn find_by_id(
     key: &[u8; 32],
 ) -> Result<Option<User>, sqlx::Error> {
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, email, password_hash, last_seen, created_at FROM users WHERE id = ?"
+        "SELECT id, username, email, password_hash, profile_picture_url, last_seen, created_at FROM users WHERE id = ?"
     )
     .bind(id)
     .fetch_optional(pool)
@@ -238,7 +244,7 @@ pub async fn search_users(
     key: &[u8; 32],
 ) -> Result<Vec<UserResponse>, sqlx::Error> {
     let all_users = sqlx::query_as::<_, UserResponse>(
-        "SELECT id, username, email, last_seen, created_at FROM users WHERE id != ?"
+        "SELECT id, username, email, profile_picture_url, last_seen, created_at FROM users WHERE id != ?"
     )
     .bind(exclude_user_id)
     .fetch_all(pool)
@@ -290,6 +296,14 @@ pub async fn username_or_email_exists(
     Ok(row2.0 > 0)
 }
 
+/// Corps de requête pour la mise à jour de la photo de profil
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateProfileRequest {
+    /// URL de la photo de profil (issue de /upload)
+    #[schema(example = "/uploads/abc123.jpg")]
+    pub profile_picture_url: Option<String>,
+}
+
 /// Met à jour le mot de passe (hash bcrypt) d'un utilisateur.
 pub async fn update_password(
     pool: &MySqlPool,
@@ -298,6 +312,20 @@ pub async fn update_password(
 ) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
         .bind(password_hash)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Met à jour la photo de profil d'un utilisateur.
+pub async fn update_profile_picture(
+    pool: &MySqlPool,
+    user_id: i32,
+    url: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE users SET profile_picture_url = ? WHERE id = ?")
+        .bind(url)
         .bind(user_id)
         .execute(pool)
         .await?;

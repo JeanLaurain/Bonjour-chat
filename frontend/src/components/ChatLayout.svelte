@@ -15,6 +15,7 @@
   import CreateGroup from './CreateGroup.svelte';
   import GroupSettings from './GroupSettings.svelte';
   import CallModal from './CallModal.svelte';
+  import ProfileModal from './ProfileModal.svelte';
 
   let conversations = [];
   let groupConversations = [];
@@ -22,6 +23,7 @@
   let showNewConv = false;
   let showNewGroup = false;
   let showGroupSettings = false;
+  let showProfile = false;
   let wsConn = null;
   let selectedUserId = null;
   let selectedGroupId = null;
@@ -98,9 +100,7 @@
 
   /** Envoie un message JSON via WebSocket (pour le signaling WebRTC) */
   function sendWs(msg) {
-    if (wsConn && wsConn.readyState === WebSocket.OPEN) {
-      wsConn.send(JSON.stringify(msg));
-    }
+    wsConn?.send(msg);
   }
 
   function handleWsMsg(data) {
@@ -358,6 +358,7 @@
       on:select={(e) => selectConversation(e.detail)}
       on:newConversation={() => showNewConv = true}
       on:newGroup={() => showNewGroup = true}
+      on:openProfile={() => showProfile = true}
     />
   </div>
 
@@ -403,5 +404,10 @@
       on:connected={handleCallConnected}
       on:end={handleCallEnd}
     />
+  {/if}
+
+  <!-- Modal de profil -->
+  {#if showProfile}
+    <ProfileModal on:close={() => showProfile = false} />
   {/if}
 </div>

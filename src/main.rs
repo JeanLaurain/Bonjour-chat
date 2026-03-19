@@ -40,6 +40,8 @@ use crate::config::AppState;
         handlers::auth::register,
         handlers::auth::login,
         handlers::auth::reset_password,
+        handlers::auth::get_me,
+        handlers::auth::update_profile,
         handlers::messages::send_message,
         handlers::messages::get_conversation,
         handlers::messages::list_conversations,
@@ -51,6 +53,7 @@ use crate::config::AppState;
         models::user::CreateUser,
         models::user::LoginUser,
         models::user::ResetPasswordRequest,
+        models::user::UpdateProfileRequest,
         models::user::UserResponse,
         models::message::Message,
         models::message::CreateMessage,
@@ -154,6 +157,8 @@ async fn main() {
         .route("/auth/login", post(handlers::auth::login))
         .route("/auth/reset-password", post(handlers::auth::reset_password))
         // --- Endpoints protégés (JWT requis dans le header Authorization) ---
+        .route("/auth/me", get(handlers::auth::get_me))
+        .route("/auth/profile", put(handlers::auth::update_profile))
         .route("/messages", post(handlers::messages::send_message))
         .route("/conversations", get(handlers::messages::list_conversations))
         .route("/conversations/:user_id", get(handlers::messages::get_conversation))

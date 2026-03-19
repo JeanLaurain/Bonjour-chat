@@ -78,6 +78,8 @@ pub struct ConversationPreview {
     pub last_seen: Option<NaiveDateTime>,
     /// Nombre de messages non lus de cet interlocuteur
     pub unread_count: i64,
+    /// URL de la photo de profil de l'interlocuteur
+    pub profile_picture_url: Option<String>,
 }
 
 /// Insère un nouveau message en base de données.
@@ -169,7 +171,8 @@ pub async fn list_conversations(
 ) -> Result<Vec<ConversationPreview>, sqlx::Error> {
     let mut conversations = sqlx::query_as::<_, ConversationPreview>(
         "SELECT u.id AS user_id, u.username, m.content AS last_message, m.created_at AS last_message_at, u.last_seen, \
-         (SELECT COUNT(*) FROM messages m3 WHERE m3.sender_id = u.id AND m3.receiver_id = ? AND m3.is_read = FALSE) AS unread_count \
+         (SELECT COUNT(*) FROM messages m3 WHERE m3.sender_id = u.id AND m3.receiver_id = ? AND m3.is_read = FALSE) AS unread_count, \
+         u.profile_picture_url \
          FROM messages m \
          JOIN users u ON u.id = CASE WHEN m.sender_id = ? THEN m.receiver_id ELSE m.sender_id END \
          WHERE m.id IN ( \

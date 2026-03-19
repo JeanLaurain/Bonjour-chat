@@ -1,16 +1,29 @@
-//! Handlers d'authentification (inscription et connexion).
+//! Handlers d'authentification (inscription, connexion, profil).
 //!
-//! Ces endpoints sont publics (pas de JWT requis).
-//! Après inscription ou connexion réussie, un token JWT est retourné
-//! au client pour être utilisé dans les requêtes protégées.
+//! Les endpoints register, login et reset-password sont publics.
+//! Les endpoints de profil (get_me, update_profile) nécessitent un JWT.
 
-use axum::{extract::State, Json};
+use axum::{extract::{Request, State}, Json};
+use axum::http::header;
 use serde_json::{json, Value};
 
 use crate::config::AppState;
 use crate::errors::{AppError, AuthResponse, ErrorResponse};
-use crate::middleware::auth::create_token;
-use crate::models::user::{self, CreateUser, LoginUser, ResetPasswordRequest, UserResponse};
+use crate::middleware::auth::{create_token, verify_token, Claims};
+use crate::models::user::{self, CreateUser, LoginUser, ResetPasswordRequest, UpdateProfileRequest, UserResponse};
+
+/// Extrait les claims JWT depuis le header Authorization de la requête.
+fn extract_claims(req: &Request, jwt_secret: &str) -> Result<Claims, AppError> {
+    let auth_header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(AppError::Unauthorized)?;
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or(AppError::Unauthorized)?;
+    verify_token(token, jwt_secret)
+}
 
 /// Inscription d'un nouvel utilisateur.
 ///
@@ -77,7 +90,8 @@ pub async fn register(
         "user": {
             "id": user_id,
             "username": payload.username,
-            "email": payload.email
+            "email": payload.email,
+            "profile_picture_url": Option::<String>::None
         },
         "token": token,
         "recovery_code": recovery_code
@@ -171,5 +185,79 @@ pub async fn reset_password(
 
     Ok(Json(json!({
         "message": "Password reset successfully"
+    })))
+}
+
+/// Récupère le profil de l'utilisateur connecté.
+///
+/// Retourne les infos déchiffrées (username, email, profile_picture_url).
+#[utoipa::path(
+    get,
+    path = "/auth/me",
+    tag = "Authentication",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Profil utilisateur", body = UserResponse),
+        (status = 401, description = "Non authentifié", body = ErrorResponse),
+    )
+)]
+pub async fn get_me(
+    State(state): State<AppState>,
+    req: Request,
+) -> Result<Json<Value>, AppError> {
+    let claims = extract_claims(&req, &state.jwt_secret)?;
+    let user = user::find_by_id(&state.db, claims.sub, &state.encryption_key)
+        .await?
+        .ok_or(AppError::UserNotFound)?;
+
+    let user_response: UserResponse = user.into();
+    Ok(Json(json!({ "user": user_response })))
+}
+
+/// Met à jour la photo de profil de l'utilisateur connecté.
+///
+/// Accepte une URL de photo (issue de /upload) ou null pour supprimer la photo.
+#[utoipa::path(
+    put,
+    path = "/auth/profile",
+    tag = "Authentication",
+    security(("bearer_auth" = [])),
+    request_body = UpdateProfileRequest,
+    responses(
+        (status = 200, description = "Profil mis à jour", body = UserResponse),
+        (status = 401, description = "Non authentifié", body = ErrorResponse),
+    )
+)]
+pub async fn update_profile(
+    State(state): State<AppState>,
+    req: Request,
+) -> Result<Json<Value>, AppError> {
+    let claims = extract_claims(&req, &state.jwt_secret)?;
+
+    // Lecture du corps de la requête
+    let body = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+        .await
+        .map_err(|_| AppError::Validation("Invalid request body".to_string()))?;
+
+    let payload: UpdateProfileRequest = serde_json::from_slice(&body)
+        .map_err(|_| AppError::Validation("Invalid JSON body".to_string()))?;
+
+    // Mettre à jour la photo de profil en base
+    user::update_profile_picture(
+        &state.db,
+        claims.sub,
+        payload.profile_picture_url.as_deref(),
+    )
+    .await?;
+
+    // Retourner le profil mis à jour
+    let user = user::find_by_id(&state.db, claims.sub, &state.encryption_key)
+        .await?
+        .ok_or(AppError::UserNotFound)?;
+
+    let user_response: UserResponse = user.into();
+    Ok(Json(json!({
+        "message": "Profile updated",
+        "user": user_response
     })))
 }

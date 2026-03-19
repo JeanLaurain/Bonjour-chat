@@ -149,13 +149,17 @@
         >
           <!-- Avatar -->
           <div class="relative flex-shrink-0">
-            <div class="w-10 h-10 rounded-full {avatarColor(conv.username || conv.group_name)} flex items-center justify-center text-white text-sm font-semibold">
-              {#if conv.type === 'group'}
-                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
-              {:else}
-                {getInitials(conv.username)}
-              {/if}
-            </div>
+            {#if conv.type === 'dm' && conv.profile_picture_url}
+              <img src={conv.profile_picture_url} alt="" class="w-10 h-10 rounded-full object-cover" />
+            {:else}
+              <div class="w-10 h-10 rounded-full {avatarColor(conv.username || conv.group_name)} flex items-center justify-center text-white text-sm font-semibold">
+                {#if conv.type === 'group'}
+                  <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+                {:else}
+                  {getInitials(conv.username)}
+                {/if}
+              </div>
+            {/if}
             <!-- Pastille en ligne -->
             {#if online}
               <div class="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 bg-emerald-500 border-2 border-slate-900 rounded-full"></div>
@@ -202,8 +206,23 @@
     {/if}
   </div>
 
-  <!-- Footer : bouton déconnexion -->
-  <div class="border-t border-slate-700/50 p-3 flex-shrink-0">
+  <!-- Footer : profil + déconnexion -->
+  <div class="border-t border-slate-700/50 p-3 flex-shrink-0 space-y-1">
+    <!-- Bouton profil -->
+    <button
+      on:click={() => dispatch('openProfile')}
+      class="w-full flex items-center {collapsed ? 'justify-center' : 'gap-2'} px-3 py-2 text-slate-400 hover:text-primary-400 hover:bg-primary-500/10 rounded-xl transition-colors text-sm"
+    >
+      {#if $auth.user?.profile_picture_url}
+        <img src={$auth.user.profile_picture_url} alt="" class="w-5 h-5 rounded-full object-cover flex-shrink-0" />
+      {:else}
+        <svg class="w-5 h-5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
+        </svg>
+      {/if}
+      {#if !collapsed}<span>Mon profil</span>{/if}
+    </button>
+    <!-- Bouton déconnexion -->
     <button
       on:click={handleLogout}
       class="w-full flex items-center {collapsed ? 'justify-center' : 'gap-2'} px-3 py-2 text-slate-400 hover:text-red-400 hover:bg-red-500/10 rounded-xl transition-colors text-sm"
