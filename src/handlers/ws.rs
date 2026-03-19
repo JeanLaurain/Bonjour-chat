@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use crate::config::AppState;
 use crate::middleware::auth::verify_token;
 use crate::models::user;
+use crate::models::group;
 
 /// Paramètres de connexion WebSocket (token JWT dans l'URL)
 #[derive(Debug, Deserialize)]
@@ -88,10 +89,32 @@ async fn handle_socket(socket: WebSocket, user_id: i32, state: AppState) {
                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) {
                         let msg_type = data.get("type").and_then(|t| t.as_str()).unwrap_or("");
                         match msg_type {
-                            // Relayer les messages de signalisation WebRTC directement au destinataire
+                            // Relayer les messages de signalisation WebRTC 1-à-1
                             "call_offer" | "call_answer" | "ice_candidate" | "call_hangup" | "call_reject" | "call_busy" => {
                                 if let Some(target_id) = data.get("target_id").and_then(|t| t.as_i64()) {
                                     // Enrichir le message avec l'ID de l'expéditeur
+                                    let mut relay = data.clone();
+                                    relay["from_id"] = serde_json::json!(user_id);
+                                    send_to_user(&state_recv, target_id as i32, &relay.to_string()).await;
+                                }
+                            }
+                            // Appel de groupe : diffuser à tous les membres du groupe
+                            "group_call_start" | "group_call_join" | "group_call_leave" => {
+                                if let Some(group_id) = data.get("group_id").and_then(|g| g.as_i64()) {
+                                    let mut relay = data.clone();
+                                    relay["from_id"] = serde_json::json!(user_id);
+                                    if let Ok(member_ids) = group::get_member_ids(&state_recv.db, group_id as i32).await {
+                                        for mid in member_ids {
+                                            if mid != user_id {
+                                                send_to_user(&state_recv, mid, &relay.to_string()).await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // Signalisation WebRTC pour appel de groupe (offer/answer/ice entre pairs)
+                            "group_call_offer" | "group_call_answer" | "group_ice_candidate" | "group_call_hangup" => {
+                                if let Some(target_id) = data.get("target_id").and_then(|t| t.as_i64()) {
                                     let mut relay = data.clone();
                                     relay["from_id"] = serde_json::json!(user_id);
                                     send_to_user(&state_recv, target_id as i32, &relay.to_string()).await;

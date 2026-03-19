@@ -17,6 +17,7 @@
   import CallModal from './CallModal.svelte';
   import ProfileModal from './ProfileModal.svelte';
   import GroupCallPicker from './GroupCallPicker.svelte';
+  import GroupCallModal from './GroupCallModal.svelte';
 
   let conversations = [];
   let groupConversations = [];
@@ -41,9 +42,14 @@
   // État de la réponse à un message
   let replyTo = null;
 
-  // État de l'appel WebRTC
+  // État de l'appel WebRTC (1-à-1)
   let callState = null; // null | { type: 'outgoing'|'incoming', userId, username, video, offer? }
   let activeCall = false;
+
+  // État de l'appel de groupe (mesh)
+  let groupCallState = null; // null | { groupId, video }
+  let groupCallSignal = null; // signal entrant pour GroupCallModal
+  let incomingGroupCall = null; // notification d'appel entrant { groupId, fromId, username, video }
 
   function checkMobile() { isMobile = window.innerWidth < 768; }
 
@@ -180,6 +186,29 @@
       callState = null;
       activeCall = false;
     }
+
+    // ── Signalisation appel de groupe ──
+    if (['group_call_offer', 'group_call_answer', 'group_ice_candidate', 'group_call_leave', 'group_call_hangup'].includes(data.type)) {
+      // Relayer au GroupCallModal si actif
+      if (groupCallState) {
+        groupCallSignal = { ...data };
+      }
+    }
+
+    if (data.type === 'group_call_start' || data.type === 'group_call_join') {
+      if (groupCallState) {
+        // Déjà dans un appel de groupe : relayer comme un join
+        groupCallSignal = { ...data };
+      } else {
+        // Notification d'appel de groupe entrant
+        incomingGroupCall = {
+          groupId: data.group_id,
+          fromId: data.from_id,
+          username: data.username || `User #${data.from_id}`,
+          video: data.video || false,
+        };
+      }
+    }
   }
 
   async function loadConversations() {
@@ -305,22 +334,28 @@
     };
   }
 
-  /** Ouvrir le sélecteur de membre pour appeler depuis un groupe */
+  /** Démarrer un appel de groupe */
   function handleGroupCall(e) {
-    if (activeCall) return;
-    groupCallPicker = { video: e.detail.video || false };
+    if (activeCall || groupCallState) return;
+    groupCallState = { groupId: selectedGroupId, video: e.detail.video || false };
   }
 
-  /** Un membre a été sélectionné dans le GroupCallPicker */
-  function handlePickMember(e) {
-    const { userId, username, video } = e.detail;
-    groupCallPicker = null;
-    callState = {
-      type: 'outgoing',
-      userId,
-      username,
-      video,
-    };
+  /** Rejoindre un appel de groupe entrant */
+  function joinIncomingGroupCall() {
+    if (!incomingGroupCall) return;
+    groupCallState = { groupId: incomingGroupCall.groupId, video: incomingGroupCall.video };
+    incomingGroupCall = null;
+  }
+
+  /** Refuser un appel de groupe entrant */
+  function dismissGroupCall() {
+    incomingGroupCall = null;
+  }
+
+  /** Fin d'appel de groupe */
+  function handleGroupCallEnd() {
+    groupCallState = null;
+    groupCallSignal = null;
   }
 
   /** Fin d'appel depuis le CallModal */
@@ -417,7 +452,7 @@
     />
   {/if}
 
-  <!-- Modal d'appel WebRTC -->
+  <!-- Modal d'appel WebRTC (1-à-1) -->
   {#if callState}
     <CallModal
       {callState}
@@ -427,18 +462,42 @@
     />
   {/if}
 
+  <!-- Modal d'appel de groupe (mesh) -->
+  {#if groupCallState}
+    <GroupCallModal
+      groupId={groupCallState.groupId}
+      video={groupCallState.video}
+      {sendWs}
+      incomingSignal={groupCallSignal}
+      on:end={handleGroupCallEnd}
+    />
+  {/if}
+
+  <!-- Notification d'appel de groupe entrant -->
+  {#if incomingGroupCall && !groupCallState}
+    <div class="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-slate-800 border border-emerald-500/50 rounded-2xl shadow-2xl p-4 flex items-center gap-4 animate-slide-down max-w-sm">
+      <div class="w-12 h-12 rounded-full bg-emerald-500/20 flex items-center justify-center animate-pulse">
+        <svg class="w-6 h-6 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/>
+        </svg>
+      </div>
+      <div class="flex-1 min-w-0">
+        <p class="text-white text-sm font-semibold">Appel de groupe</p>
+        <p class="text-slate-400 text-xs truncate">{incomingGroupCall.username} a lancé un appel</p>
+      </div>
+      <div class="flex gap-2">
+        <button on:click={joinIncomingGroupCall} class="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white text-sm rounded-lg font-medium transition-colors">
+          Rejoindre
+        </button>
+        <button on:click={dismissGroupCall} class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-sm rounded-lg transition-colors">
+          Ignorer
+        </button>
+      </div>
+    </div>
+  {/if}
+
   <!-- Modal de profil -->
   {#if showProfile}
     <ProfileModal on:close={() => showProfile = false} />
-  {/if}
-
-  <!-- Sélecteur de membre pour appel depuis un groupe -->
-  {#if groupCallPicker && selectedGroupId}
-    <GroupCallPicker
-      groupId={selectedGroupId}
-      video={groupCallPicker.video}
-      on:pick={handlePickMember}
-      on:close={() => groupCallPicker = null}
-    />
   {/if}
 </div>
