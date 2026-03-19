@@ -93,6 +93,13 @@ pub async fn send_message(
         ));
     }
 
+    // Pour les fichiers, l'URL doit également être fournie
+    if payload.message_type == "file" && payload.image_url.is_none() {
+        return Err(AppError::Validation(
+            "image_url is required for file messages".to_string(),
+        ));
+    }
+
     // Vérification que le destinataire existe en base
     user::find_by_id(&state.db, payload.receiver_id, &state.encryption_key)
         .await?
@@ -113,6 +120,8 @@ pub async fn send_message(
         &payload.content,
         &payload.message_type,
         payload.image_url.as_deref(),
+        payload.original_filename.as_deref(),
+        payload.reply_to_id,
         &state.encryption_key,
     )
     .await?;
@@ -127,6 +136,8 @@ pub async fn send_message(
             "content": payload.content,
             "message_type": payload.message_type,
             "image_url": payload.image_url,
+            "original_filename": payload.original_filename,
+            "reply_to_id": payload.reply_to_id,
             "created_at": chrono::Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string()
         }
     })

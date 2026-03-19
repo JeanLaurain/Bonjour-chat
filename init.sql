@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT NOT NULL,
     message_type VARCHAR(10) DEFAULT 'text',
     image_url VARCHAR(500) DEFAULT NULL,
+    original_filename VARCHAR(500) DEFAULT NULL,
+    reply_to_id INT DEFAULT NULL,
     is_read BOOLEAN DEFAULT FALSE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -68,6 +70,8 @@ CREATE TABLE IF NOT EXISTS group_messages (
     content TEXT NOT NULL,
     message_type VARCHAR(10) DEFAULT 'text',
     image_url VARCHAR(500) DEFAULT NULL,
+    original_filename VARCHAR(500) DEFAULT NULL,
+    reply_to_id INT DEFAULT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (group_id) REFERENCES `groups`(id) ON DELETE CASCADE,
     FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE
@@ -78,3 +82,6 @@ CREATE INDEX idx_group_members_user ON group_members(user_id);
 
 -- Migration : ajouter recovery_code_hash si la colonne n'existe pas encore
 -- (MySQL n'a pas IF NOT EXISTS pour ALTER TABLE, ce sera ignoré si déjà présent lors de la création)
+
+-- Migration : ajouter les colonnes reply_to_id et original_filename
+-- Ces ALTER TABLE échoueront silencieusement si les colonnes existent déjà (nouveau schéma)

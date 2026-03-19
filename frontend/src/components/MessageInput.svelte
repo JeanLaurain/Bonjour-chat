@@ -1,10 +1,14 @@
 <!--
-  MessageInput — Champ de saisie avec upload de fichiers.
-  Auto-resize du textarea, preview de l'image avant envoi.
+  MessageInput — Champ de saisie avec upload de fichiers et réponse.
+  Auto-resize du textarea, preview du fichier avant envoi,
+  aperçu du message auquel on répond.
 -->
 <script>
   import { createEventDispatcher } from 'svelte';
   import * as api from '../lib/api.js';
+
+  /** Message auquel on répond (null si pas de réponse) */
+  export let replyTo = null;
 
   const dispatch = createEventDispatcher();
   let text = '';
@@ -25,13 +29,16 @@
     try {
       let imageUrl = null;
       let messageType = 'text';
+      let originalFilename = null;
 
-      // Upload de l'image si présente
+      // Upload du fichier si présent
       if (hasFile) {
         uploading = true;
         const result = await api.uploadImage(previewFile);
         imageUrl = result.url;
-        messageType = 'image';
+        originalFilename = result.original_filename || previewFile.name;
+        // Déterminer le type de message selon le type de fichier
+        messageType = previewFile.type.startsWith('image/') ? 'image' : 'file';
         uploading = false;
       }
 
@@ -39,10 +46,13 @@
         content: hasText ? text.trim() : (imageUrl || ''),
         messageType,
         imageUrl,
+        originalFilename,
+        replyToId: replyTo?.id || null,
       });
 
       text = '';
       clearPreview();
+      dispatch('clearReply');
       if (textareaEl) { textareaEl.style.height = 'auto'; }
     } catch (e) {
       console.error('Send error:', e);
@@ -55,10 +65,6 @@
   function handleFileSelect(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!file.type.startsWith('image/') && !file.type.startsWith('application/')) {
-      alert('Type de fichier non supporté');
-      return;
-    }
     previewFile = file;
     if (file.type.startsWith('image/')) {
       const reader = new FileReader();
@@ -87,10 +93,31 @@
     textareaEl.style.height = 'auto';
     textareaEl.style.height = Math.min(textareaEl.scrollHeight, 120) + 'px';
   }
+
+  /** Raccourci pour afficher le nom du fichier répondu */
+  function replyPreviewText(msg) {
+    if (!msg) return '';
+    if (msg.message_type === 'image') return '📷 Photo';
+    if (msg.message_type === 'file') return `📎 ${msg.original_filename || 'Fichier'}`;
+    return msg.content?.substring(0, 80) || '';
+  }
 </script>
 
 <div class="border-t border-slate-700/50 bg-slate-800/90 backdrop-blur px-4 md:px-6 py-3">
-  <!-- Preview de l'image avant envoi -->
+  <!-- Aperçu du message auquel on répond -->
+  {#if replyTo}
+    <div class="mb-2 flex items-center gap-2 px-3 py-2 bg-slate-700/50 rounded-lg border-l-2 border-primary-500 animate-slide-up">
+      <div class="flex-1 min-w-0">
+        <p class="text-[11px] text-primary-400 font-medium">↩ Réponse à {replyTo.sender_username || 'message'}</p>
+        <p class="text-xs text-slate-400 truncate">{replyPreviewText(replyTo)}</p>
+      </div>
+      <button on:click={() => dispatch('clearReply')} class="text-slate-400 hover:text-red-400 p-1 rounded transition-colors flex-shrink-0">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+  {/if}
+
+  <!-- Preview du fichier avant envoi -->
   {#if previewUrl || previewFile}
     <div class="mb-3 flex items-start gap-3 animate-slide-up">
       {#if previewUrl}
@@ -111,13 +138,13 @@
   {/if}
 
   <div class="flex items-end gap-2">
-    <!-- Bouton pièce jointe -->
+    <!-- Bouton pièce jointe (accepte tous les fichiers) -->
     <button on:click={() => fileInput.click()} class="flex-shrink-0 p-2.5 text-slate-400 hover:text-primary-400 hover:bg-slate-700/50 rounded-xl transition-colors">
       <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
         <path d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/>
       </svg>
     </button>
-    <input bind:this={fileInput} type="file" accept="image/*,.pdf,.doc,.docx,.txt" on:change={handleFileSelect} class="hidden" />
+    <input bind:this={fileInput} type="file" accept="*/*" on:change={handleFileSelect} class="hidden" />
 
     <!-- Textarea -->
     <textarea

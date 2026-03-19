@@ -56,6 +56,25 @@
     return colors[Math.abs(hash) % colors.length];
   }
 
+  /** Transforme le dernier message pour un affichage lisible dans la sidebar.
+   *  Remplace les chemins /uploads/uuid par un emoji + type de fichier. */
+  function formatLastMessage(msg, type, memberCount) {
+    if (!msg) return type === 'group' ? `${memberCount || 0} membres` : 'Commencer la conversation';
+    // Détecter les chemins de fichiers uploadés (ex: /uploads/uuid.png)
+    const uploadMatch = msg.match(/\/uploads\/[a-f0-9-]+\.(\w+)/i);
+    if (uploadMatch) {
+      const ext = uploadMatch[1].toLowerCase();
+      const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'];
+      if (imageExts.includes(ext)) return '📷 Photo';
+      const videoExts = ['mp4', 'webm', 'mov', 'avi', 'mkv'];
+      if (videoExts.includes(ext)) return '🎥 Vidéo';
+      const audioExts = ['mp3', 'wav', 'ogg', 'aac', 'flac'];
+      if (audioExts.includes(ext)) return '🎵 Audio';
+      return '📎 Fichier';
+    }
+    return msg;
+  }
+
   function handleLogout() { auth.logout(); }
 
   $: totalUnread = Object.values($unreadCounts).reduce((s, v) => s + v, 0)
@@ -162,7 +181,7 @@
               </div>
               <div class="flex items-center justify-between mt-0.5">
                 <p class="text-xs text-slate-400 truncate flex-1">
-                  {conv.last_message || (conv.type === 'group' ? `${conv.member_count || 0} membres` : 'Commencer la conversation')}
+                  {formatLastMessage(conv.last_message, conv.type, conv.member_count)}
                 </p>
                 {#if unread > 0}
                   <span class="ml-2 min-w-[20px] h-5 bg-primary-500 rounded-full text-[11px] font-bold text-white flex items-center justify-center px-1.5 flex-shrink-0">

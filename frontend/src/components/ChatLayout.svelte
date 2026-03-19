@@ -1,7 +1,7 @@
 <!--
   ChatLayout — Orchestrateur principal après connexion.
   Gère les conversations DM + groupes, le WebSocket, les notifications,
-  la pagination des messages et les réglages de groupe.
+  la pagination des messages, les réglages de groupe, les réponses et les appels.
   Responsive : bascule sidebar/chat sur mobile.
 -->
 <script>
@@ -14,6 +14,7 @@
   import NewConversation from './NewConversation.svelte';
   import CreateGroup from './CreateGroup.svelte';
   import GroupSettings from './GroupSettings.svelte';
+  import CallModal from './CallModal.svelte';
 
   let conversations = [];
   let groupConversations = [];
@@ -32,6 +33,13 @@
   // État de pagination
   let hasMore = false;
   let loadingMore = false;
+
+  // État de la réponse à un message
+  let replyTo = null;
+
+  // État de l'appel WebRTC
+  let callState = null; // null | { type: 'outgoing'|'incoming', userId, username, video, offer? }
+  let activeCall = false;
 
   function checkMobile() { isMobile = window.innerWidth < 768; }
 
@@ -88,9 +96,17 @@
     wsConn = createWsConnection(s.token, handleWsMsg);
   }
 
+  /** Envoie un message JSON via WebSocket (pour le signaling WebRTC) */
+  function sendWs(msg) {
+    if (wsConn && wsConn.readyState === WebSocket.OPEN) {
+      wsConn.send(JSON.stringify(msg));
+    }
+  }
+
   function handleWsMsg(data) {
     const me = $auth.user?.id;
 
+    // Messages de chat
     if (data.type === 'new_message') {
       const m = data.data;
       if (convType === 'dm' && selectedUserId && (m.sender_id === selectedUserId || m.receiver_id === selectedUserId)) {
@@ -99,7 +115,7 @@
       } else if (m.sender_id !== me) {
         unreadCounts.update(c => ({ ...c, [m.sender_id]: (c[m.sender_id] || 0) + 1 }));
         const name = conversations.find(c => c.user_id === m.sender_id)?.username || 'Nouveau message';
-        showLocalNotification(name, m.message_type === 'image' ? '📷 Image' : m.content);
+        showLocalNotification(name, m.message_type === 'image' ? '📷 Image' : m.message_type === 'file' ? '📎 Fichier' : m.content);
       }
       loadConversations();
     }
@@ -118,7 +134,6 @@
 
     if (data.type === 'group_created') loadGroups();
 
-    // Mise à jour en temps réel du nom de groupe
     if (data.type === 'group_renamed') {
       const { group_id, name } = data.data;
       loadGroups();
@@ -129,6 +144,39 @@
 
     if (data.type === 'user_status') {
       onlineUsers.update(u => ({ ...u, [data.data.user_id]: data.data.online }));
+    }
+
+    // ── WebRTC Signaling ──
+    if (data.type === 'call_offer') {
+      // Appel entrant
+      if (activeCall) {
+        // Déjà en appel → refuser automatiquement
+        sendWs({ type: 'call_busy', target_id: data.from_id });
+        return;
+      }
+      const caller = conversations.find(c => c.user_id === data.from_id);
+      callState = {
+        type: 'incoming',
+        userId: data.from_id,
+        username: caller?.username || `User #${data.from_id}`,
+        video: data.video || false,
+        offer: data.offer,
+      };
+    }
+
+    if (data.type === 'call_answer' && callState?.type === 'outgoing') {
+      // La réponse est gérée par le CallModal via un callback
+      callState = { ...callState, answer: data.answer };
+    }
+
+    if (data.type === 'ice_candidate' && (callState || activeCall)) {
+      // Les candidats ICE sont gérés par le CallModal
+      callState = callState ? { ...callState, newIceCandidate: data.candidate } : callState;
+    }
+
+    if (data.type === 'call_hangup' || data.type === 'call_reject' || data.type === 'call_busy') {
+      callState = null;
+      activeCall = false;
     }
   }
 
@@ -148,7 +196,6 @@
     } catch {}
   }
 
-  // Charge les 10 derniers messages d'un DM (pagination initiale)
   async function loadMessages(userId) {
     try {
       const data = await api.getConversation(userId);
@@ -160,7 +207,6 @@
     }
   }
 
-  // Charge les 10 derniers messages d'un groupe (pagination initiale)
   async function loadGroupMessages(groupId) {
     try {
       const data = await api.getGroupMessages(groupId);
@@ -172,12 +218,9 @@
     }
   }
 
-  // Charge les messages plus anciens (scroll vers le haut)
   async function handleLoadMore() {
     if (loadingMore || !hasMore || messages.length === 0) return;
     loadingMore = true;
-
-    // Le plus ancien message actuellement affiché
     const oldestId = messages[0]?.id;
     if (!oldestId) { loadingMore = false; return; }
 
@@ -193,17 +236,15 @@
         messages = [...older, ...messages];
         hasMore = data.has_more || false;
       }
-    } catch {
-      // Silencieux en cas d'erreur
-    } finally {
+    } catch {} finally {
       loadingMore = false;
     }
   }
 
   async function selectConversation(conv) {
-    // Reset pagination pour la nouvelle conversation
     hasMore = false;
     loadingMore = false;
+    replyTo = null;
 
     if (conv.type === 'group') {
       selectedGroupId = conv.group_id || conv.id;
@@ -225,18 +266,51 @@
   }
 
   async function handleSend(e) {
-    const { content, messageType, imageUrl } = e.detail;
+    const { content, messageType, imageUrl, originalFilename, replyToId } = e.detail;
     try {
       if (convType === 'group' && selectedGroupId) {
-        await api.sendGroupMessage(selectedGroupId, content, messageType, imageUrl);
+        await api.sendGroupMessage(selectedGroupId, content, messageType, imageUrl, originalFilename, replyToId);
         await loadGroupMessages(selectedGroupId);
         loadGroups();
       } else if (convType === 'dm' && selectedUserId) {
-        await api.sendMessage(selectedUserId, content, messageType, imageUrl);
+        await api.sendMessage(selectedUserId, content, messageType, imageUrl, originalFilename, replyToId);
         await loadMessages(selectedUserId);
         loadConversations();
       }
     } catch (err) { console.error('Send error:', err); }
+    replyTo = null;
+  }
+
+  /** L'utilisateur veut répondre à un message */
+  function handleReply(e) {
+    replyTo = e.detail;
+  }
+
+  function handleClearReply() {
+    replyTo = null;
+  }
+
+  /** Démarrer un appel (audio ou vidéo) */
+  function handleStartCall(e) {
+    if (activeCall || !selectedUserId) return;
+    const { video } = e.detail;
+    const conv = $currentConversation;
+    callState = {
+      type: 'outgoing',
+      userId: selectedUserId,
+      username: conv?.username || '',
+      video: video || false,
+    };
+  }
+
+  /** Fin d'appel depuis le CallModal */
+  function handleCallEnd() {
+    callState = null;
+    activeCall = false;
+  }
+
+  function handleCallConnected() {
+    activeCall = true;
   }
 
   async function handleStartConv(e) {
@@ -246,6 +320,7 @@
     selectedGroupId = null;
     convType = 'dm';
     hasMore = false;
+    replyTo = null;
     currentConversation.set({ type: 'dm', user_id: user.id, username: user.username, last_message: '', last_message_at: null, last_seen: user.last_seen });
     await loadMessages(user.id);
     loadConversations();
@@ -259,6 +334,7 @@
     selectedUserId = null;
     convType = 'group';
     hasMore = false;
+    replyTo = null;
     currentConversation.set({ type: 'group', id: group.id, group_id: group.id, username: group.name, group_name: group.name, last_message: '', member_count: group.members?.length || 0 });
     messages = [];
     loadGroups();
@@ -292,10 +368,14 @@
       conversationType={convType}
       {hasMore}
       {loadingMore}
+      {replyTo}
       on:send={handleSend}
       on:back={handleBack}
       on:loadMore={handleLoadMore}
       on:openGroupSettings={() => showGroupSettings = true}
+      on:reply={handleReply}
+      on:clearReply={handleClearReply}
+      on:startCall={handleStartCall}
     />
   </div>
 
@@ -312,6 +392,16 @@
       on:renamed={handleGroupRenamed}
       on:membersChanged={() => loadGroups()}
       on:close={() => showGroupSettings = false}
+    />
+  {/if}
+
+  <!-- Modal d'appel WebRTC -->
+  {#if callState}
+    <CallModal
+      {callState}
+      {sendWs}
+      on:connected={handleCallConnected}
+      on:end={handleCallEnd}
     />
   {/if}
 </div>

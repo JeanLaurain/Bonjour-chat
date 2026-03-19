@@ -149,9 +149,9 @@
                   <span class="text-[10px] bg-primary-500/20 text-primary-400 px-2 py-0.5 rounded-full">Vous</span>
                 {/if}
               </div>
-              {#if member.id !== me}
+              {#if member.user_id !== me}
                 <button
-                  on:click={() => removeMember(member.id)}
+                  on:click={() => removeMember(member.user_id)}
                   class="text-red-400 hover:text-red-300 p-1.5 rounded-lg hover:bg-red-500/10 transition-colors"
                   title="Retirer du groupe"
                 >

@@ -38,6 +38,8 @@ pub struct GroupMessage {
     pub content: String,
     pub message_type: String,
     pub image_url: Option<String>,
+    pub original_filename: Option<String>,
+    pub reply_to_id: Option<i32>,
     pub created_at: NaiveDateTime,
 }
 
@@ -57,6 +59,8 @@ pub struct CreateGroupMessage {
     #[serde(default = "default_text")]
     pub message_type: String,
     pub image_url: Option<String>,
+    pub original_filename: Option<String>,
+    pub reply_to_id: Option<i32>,
 }
 
 fn default_text() -> String {
@@ -219,19 +223,23 @@ pub async fn create_group_message(
     content: &str,
     message_type: &str,
     image_url: Option<&str>,
+    original_filename: Option<&str>,
+    reply_to_id: Option<i32>,
     key: &[u8; 32],
 ) -> Result<u64, sqlx::Error> {
     let encrypted_content = crypto::encrypt(content, key).unwrap_or_else(|_| content.to_string());
 
     let result = sqlx::query(
-        "INSERT INTO group_messages (group_id, sender_id, content, message_type, image_url) \
-         VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO group_messages (group_id, sender_id, content, message_type, image_url, original_filename, reply_to_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(group_id)
     .bind(sender_id)
     .bind(&encrypted_content)
     .bind(message_type)
     .bind(image_url)
+    .bind(original_filename)
+    .bind(reply_to_id)
     .execute(pool)
     .await?;
 
@@ -250,7 +258,7 @@ pub async fn get_group_messages(
     let mut messages = if let Some(bid) = before_id {
         sqlx::query_as::<_, GroupMessage>(
             "SELECT gm.id, gm.group_id, gm.sender_id, u.username AS sender_username, \
-             gm.content, gm.message_type, gm.image_url, gm.created_at \
+             gm.content, gm.message_type, gm.image_url, gm.original_filename, gm.reply_to_id, gm.created_at \
              FROM group_messages gm \
              JOIN users u ON u.id = gm.sender_id \
              WHERE gm.group_id = ? AND gm.id < ? \
@@ -262,7 +270,7 @@ pub async fn get_group_messages(
     } else {
         sqlx::query_as::<_, GroupMessage>(
             "SELECT gm.id, gm.group_id, gm.sender_id, u.username AS sender_username, \
-             gm.content, gm.message_type, gm.image_url, gm.created_at \
+             gm.content, gm.message_type, gm.image_url, gm.original_filename, gm.reply_to_id, gm.created_at \
              FROM group_messages gm \
              JOIN users u ON u.id = gm.sender_id \
              WHERE gm.group_id = ? \

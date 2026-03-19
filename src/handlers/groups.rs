@@ -220,6 +220,8 @@ pub async fn send_group_message(
         &payload.content,
         &payload.message_type,
         payload.image_url.as_deref(),
+        payload.original_filename.as_deref(),
+        payload.reply_to_id,
         &state.encryption_key,
     )
     .await?;
@@ -243,6 +245,8 @@ pub async fn send_group_message(
             "content": payload.content,
             "message_type": payload.message_type,
             "image_url": payload.image_url,
+            "original_filename": payload.original_filename,
+            "reply_to_id": payload.reply_to_id,
             "created_at": chrono::Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string()
         }
     })

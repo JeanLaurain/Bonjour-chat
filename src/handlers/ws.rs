@@ -77,11 +77,31 @@ async fn handle_socket(socket: WebSocket, user_id: i32, state: AppState) {
         }
     });
 
-    // Tâche de réception : WebSocket client → détection de fermeture
+    // Tâche de réception : WebSocket client → traitement des messages entrants
+    let state_recv = state.clone();
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
-            if matches!(msg, WsMessage::Close(_)) {
-                break;
+            match msg {
+                WsMessage::Close(_) => break,
+                WsMessage::Text(text) => {
+                    // Traiter les messages JSON entrants (signalisation WebRTC)
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) {
+                        let msg_type = data.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        match msg_type {
+                            // Relayer les messages de signalisation WebRTC directement au destinataire
+                            "call_offer" | "call_answer" | "ice_candidate" | "call_hangup" | "call_reject" | "call_busy" => {
+                                if let Some(target_id) = data.get("target_id").and_then(|t| t.as_i64()) {
+                                    // Enrichir le message avec l'ID de l'expéditeur
+                                    let mut relay = data.clone();
+                                    relay["from_id"] = serde_json::json!(user_id);
+                                    send_to_user(&state_recv, target_id as i32, &relay.to_string()).await;
+                                }
+                            }
+                            _ => {} // Ignorer les autres types de messages
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     });

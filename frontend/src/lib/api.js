@@ -52,7 +52,7 @@ export const searchUsers = (q) =>
   request(`/users/search?q=${encodeURIComponent(q)}`, { headers: authHeaders() });
 
 // ── Messages (DM) ─────────────────────────────────────
-export const sendMessage = (receiverId, content, messageType = 'text', imageUrl = null) =>
+export const sendMessage = (receiverId, content, messageType = 'text', imageUrl = null, originalFilename = null, replyToId = null) =>
   request('/messages', {
     method: 'POST',
     headers: authHeaders(),
@@ -61,6 +61,8 @@ export const sendMessage = (receiverId, content, messageType = 'text', imageUrl 
       content,
       message_type: messageType,
       image_url: imageUrl,
+      original_filename: originalFilename,
+      reply_to_id: replyToId,
     }),
   });
 
@@ -99,11 +101,17 @@ export const getGroupMessages = (id, beforeId = null) => {
   return request(url, { headers: authHeaders() });
 };
 
-export const sendGroupMessage = (id, content, messageType = 'text', imageUrl = null) =>
+export const sendGroupMessage = (id, content, messageType = 'text', imageUrl = null, originalFilename = null, replyToId = null) =>
   request(`/groups/${id}/messages`, {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ content, message_type: messageType, image_url: imageUrl }),
+    body: JSON.stringify({
+      content,
+      message_type: messageType,
+      image_url: imageUrl,
+      original_filename: originalFilename,
+      reply_to_id: replyToId,
+    }),
   });
 
 export const addGroupMembers = (id, userIds) =>

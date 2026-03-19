@@ -22,10 +22,14 @@ pub struct Message {
     pub receiver_id: i32,
     /// Contenu textuel du message
     pub content: String,
-    /// Type de message : "text" ou "image"
+    /// Type de message : "text", "image" ou "file"
     pub message_type: String,
-    /// URL de l'image (si message_type = "image")
+    /// URL de l'image/fichier (si message_type != "text")
     pub image_url: Option<String>,
+    /// Nom original du fichier uploadé
+    pub original_filename: Option<String>,
+    /// ID du message auquel celui-ci répond (null si pas une réponse)
+    pub reply_to_id: Option<i32>,
     /// Indique si le message a été lu par le destinataire
     pub is_read: bool,
     /// Date et heure d'envoi
@@ -41,12 +45,16 @@ pub struct CreateMessage {
     /// Contenu du message (texte ou légende de l'image)
     #[schema(example = "Bonjour!")]
     pub content: String,
-    /// Type de message : "text" (défaut) ou "image"
+    /// Type de message : "text" (défaut), "image" ou "file"
     #[serde(default = "default_text")]
     #[schema(example = "text")]
     pub message_type: String,
-    /// URL de l'image (requis si message_type = "image")
+    /// URL de l'image/fichier (requis si message_type != "text")
     pub image_url: Option<String>,
+    /// Nom original du fichier uploadé
+    pub original_filename: Option<String>,
+    /// ID du message auquel on répond
+    pub reply_to_id: Option<i32>,
 }
 
 /// Valeur par défaut pour le type de message
@@ -81,18 +89,23 @@ pub async fn create_message(
     content: &str,
     message_type: &str,
     image_url: Option<&str>,
+    original_filename: Option<&str>,
+    reply_to_id: Option<i32>,
     key: &[u8; 32],
 ) -> Result<u64, sqlx::Error> {
     let encrypted_content = crypto::encrypt(content, key).unwrap_or_else(|_| content.to_string());
 
     let result = sqlx::query(
-        "INSERT INTO messages (sender_id, receiver_id, content, message_type, image_url) VALUES (?, ?, ?, ?, ?)"
+        "INSERT INTO messages (sender_id, receiver_id, content, message_type, image_url, original_filename, reply_to_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(sender_id)
     .bind(receiver_id)
     .bind(&encrypted_content)
     .bind(message_type)
     .bind(image_url)
+    .bind(original_filename)
+    .bind(reply_to_id)
     .execute(pool)
     .await?;
 
@@ -113,7 +126,7 @@ pub async fn get_conversation(
     let mut messages = if let Some(bid) = before_id {
         // Charger les messages avant un ID donné (scroll vers le haut)
         sqlx::query_as::<_, Message>(
-            "SELECT id, sender_id, receiver_id, content, message_type, image_url, is_read, created_at FROM messages \
+            "SELECT id, sender_id, receiver_id, content, message_type, image_url, original_filename, reply_to_id, is_read, created_at FROM messages \
              WHERE ((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)) AND id < ? \
              ORDER BY id DESC LIMIT ?"
         )
@@ -125,7 +138,7 @@ pub async fn get_conversation(
     } else {
         // Charger les N derniers messages
         sqlx::query_as::<_, Message>(
-            "SELECT id, sender_id, receiver_id, content, message_type, image_url, is_read, created_at FROM messages \
+            "SELECT id, sender_id, receiver_id, content, message_type, image_url, original_filename, reply_to_id, is_read, created_at FROM messages \
              WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?) \
              ORDER BY id DESC LIMIT ?"
         )

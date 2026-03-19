@@ -1,5 +1,6 @@
 /**
  * Gestion des notifications push et locales.
+ * Compatible mobile et Opera avec fallback vers Notification API.
  */
 import * as api from './api.js';
 
@@ -10,11 +11,42 @@ export async function requestNotificationPermission() {
   return Notification.requestPermission();
 }
 
-/** Affiche une notification locale si l'onglet n'est pas actif */
+/**
+ * Affiche une notification locale si l'onglet n'est pas actif.
+ * Utilise le service worker si disponible (meilleure compatibilité mobile),
+ * sinon fallback vers la Notification API classique.
+ */
 export function showLocalNotification(title, body) {
   if (document.hasFocus()) return;
-  if (Notification.permission === 'granted') {
+  if (Notification.permission !== 'granted') return;
+
+  // Préférer le service worker pour les notifications (meilleur support mobile/Opera)
+  if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.ready.then(reg => {
+      reg.showNotification(title, {
+        body,
+        icon: '/icon-192.svg',
+        badge: '/icon-192.svg',
+        vibrate: [200, 100, 200],
+        tag: `local-${Date.now()}`,
+        renotify: true,
+      });
+    }).catch(() => {
+      // Fallback classique si le service worker échoue
+      fallbackNotification(title, body);
+    });
+  } else {
+    fallbackNotification(title, body);
+  }
+}
+
+/** Fallback : notification via l'API Notification classique */
+function fallbackNotification(title, body) {
+  try {
     new Notification(title, { body, icon: '/icon-192.svg', badge: '/icon-192.svg' });
+  } catch {
+    // Sur certains navigateurs mobile, Notification() lance une erreur
+    // Dans ce cas, on ne peut rien faire de plus
   }
 }
 
