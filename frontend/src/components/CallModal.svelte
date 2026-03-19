@@ -13,10 +13,13 @@
 
   const dispatch = createEventDispatcher();
 
-  // Serveurs STUN publics pour la résolution NAT
+  // Serveurs STUN/TURN pour la résolution NAT
   const ICE_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
   ];
 
   let pc = null; // RTCPeerConnection
@@ -24,22 +27,38 @@
   let remoteStream = null;
   let localVideo;
   let remoteVideo;
-  let remoteAudio; // Élément audio séparé pour les appels audio-only
-  let status = 'initializing'; // initializing, ringing, connected, ended
+  let remoteAudio;
+  let status = 'initializing'; // initializing, ringing, connecting, connected, ended
   let duration = 0;
   let durationInterval;
   let audioEnabled = true;
   let videoEnabled = false;
   let ringtone;
+  let debugInfo = ''; // Info de debug visible
 
-  // Buffer de candidats ICE reçus avant que la description distante ne soit définie
+  // Buffer de candidats ICE reçus avant setRemoteDescription
   let candidateBuffer = [];
   let remoteDescSet = false;
-  // Compteur pour suivre les candidats déjà traités depuis l'array
   let processedCandidates = 0;
+  let answerProcessed = false; // Éviter de traiter l'answer plusieurs fois
+
+  // Sérialise un RTCSessionDescription en objet simple {type, sdp}
+  function serializeSDP(desc) {
+    if (!desc) return null;
+    return { type: desc.type, sdp: desc.sdp };
+  }
+
+  // Sérialise un RTCIceCandidate en objet simple
+  function serializeCandidate(c) {
+    if (!c) return null;
+    return { candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex, usernameFragment: c.usernameFragment };
+  }
 
   // Réactive : traiter la réponse SDP quand elle arrive (appel sortant)
-  $: if (callState?.answer) handleRemoteAnswer(callState.answer);
+  $: if (callState?.answer && !answerProcessed) {
+    answerProcessed = true;
+    handleRemoteAnswer(callState.answer);
+  }
 
   // Réactive : traiter les nouveaux candidats ICE (accumulés dans un array)
   $: if (callState?.iceCandidates?.length > processedCandidates) {
@@ -50,6 +69,7 @@
 
   onMount(async () => {
     videoEnabled = callState?.video || false;
+    console.log('[Call] onMount, type:', callState?.type, 'video:', videoEnabled);
     if (callState?.type === 'outgoing') {
       await startOutgoingCall();
     } else if (callState?.type === 'incoming') {
@@ -69,6 +89,7 @@
         audio: true,
         video: videoEnabled,
       });
+      console.log('[Call] getUserMedia OK, tracks:', localStream.getTracks().map(t => t.kind));
 
       pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
 
@@ -78,40 +99,49 @@
       // Réception des pistes distantes (audio/vidéo)
       remoteStream = new MediaStream();
       pc.ontrack = (e) => {
+        console.log('[Call] ontrack:', e.track.kind);
         remoteStream.addTrack(e.track);
         // Connecter le flux aux éléments de lecture
         if (remoteVideo) remoteVideo.srcObject = remoteStream;
         if (remoteAudio) remoteAudio.srcObject = remoteStream;
       };
 
-      // Envoi des candidats ICE au pair distant
+      // Envoi des candidats ICE au pair distant (sérialisation explicite)
       pc.onicecandidate = (e) => {
         if (e.candidate) {
+          console.log('[Call] ICE candidate local:', e.candidate.candidate?.substring(0, 50));
           sendWs({
             type: 'ice_candidate',
             target_id: callState.userId,
-            candidate: e.candidate,
+            candidate: serializeCandidate(e.candidate),
           });
         }
       };
 
-      // Surveillance de l'état de la connexion ICE (plus fiable que connectionState)
+      // Surveillance de l'état ICE
       pc.oniceconnectionstatechange = () => {
         if (!pc) return;
         const s = pc.iceConnectionState;
+        console.log('[Call] ICE connection state:', s);
+        debugInfo = `ICE: ${s}`;
         if ((s === 'connected' || s === 'completed') && status !== 'connected') {
           status = 'connected';
           dispatch('connected');
           startDurationTimer();
         }
-        if (s === 'failed' || s === 'closed') {
+        if (s === 'failed') {
+          debugInfo = 'ICE: failed — connexion impossible';
+          hangup();
+        }
+        if (s === 'closed') {
           hangup();
         }
       };
 
-      // Surveillance supplémentaire via connectionState (browsers modernes)
+      // Surveillance connectionState (browsers modernes)
       pc.onconnectionstatechange = () => {
         if (!pc) return;
+        console.log('[Call] Connection state:', pc.connectionState);
         if (pc.connectionState === 'connected' && status !== 'connected') {
           status = 'connected';
           dispatch('connected');
@@ -122,10 +152,19 @@
         }
       };
 
+      pc.onicegatheringstatechange = () => {
+        if (pc) console.log('[Call] ICE gathering state:', pc.iceGatheringState);
+      };
+
+      pc.onsignalingstatechange = () => {
+        if (pc) console.log('[Call] Signaling state:', pc.signalingState);
+      };
+
       // Afficher la vidéo locale
       if (localVideo) localVideo.srcObject = localStream;
     } catch (err) {
-      console.error('Erreur accès média:', err);
+      console.error('[Call] Erreur accès média:', err);
+      debugInfo = 'Erreur: ' + err.message;
       hangup();
     }
   }
@@ -136,40 +175,56 @@
     await initPeerConnection();
     if (!pc) return;
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      console.log('[Call] Offer créée, signaling:', pc.signalingState);
 
-    sendWs({
-      type: 'call_offer',
-      target_id: callState.userId,
-      offer: pc.localDescription,
-      video: videoEnabled,
-    });
+      sendWs({
+        type: 'call_offer',
+        target_id: callState.userId,
+        offer: serializeSDP(pc.localDescription),
+        video: videoEnabled,
+      });
+      console.log('[Call] Offer envoyée à user', callState.userId);
+    } catch (err) {
+      console.error('[Call] Erreur création offer:', err);
+      hangup();
+    }
   }
 
   /** Accepter un appel entrant */
   async function acceptCall() {
     stopRingtone();
+    status = 'connecting';
+    debugInfo = 'Connexion...';
     await initPeerConnection();
     if (!pc || !callState?.offer) return;
 
-    await pc.setRemoteDescription(new RTCSessionDescription(callState.offer));
-    remoteDescSet = true;
-    // Appliquer les candidats ICE reçus pendant la phase de sonnerie
-    await flushCandidateBuffer();
+    try {
+      console.log('[Call] Setting remote desc (offer)...');
+      await pc.setRemoteDescription(new RTCSessionDescription(callState.offer));
+      remoteDescSet = true;
+      console.log('[Call] Remote desc set, flushing', candidateBuffer.length, 'buffered candidates');
+      await flushCandidateBuffer();
 
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
 
-    sendWs({
-      type: 'call_answer',
-      target_id: callState.userId,
-      answer: pc.localDescription,
-    });
+      sendWs({
+        type: 'call_answer',
+        target_id: callState.userId,
+        answer: serializeSDP(pc.localDescription),
+      });
+      console.log('[Call] Answer envoyée à user', callState.userId);
 
-    status = 'connected';
-    dispatch('connected');
-    startDurationTimer();
+      // Le statut passera à 'connected' via oniceconnectionstatechange
+      status = 'connecting';
+      debugInfo = 'En attente ICE...';
+    } catch (err) {
+      console.error('[Call] Erreur acceptCall:', err);
+      debugInfo = 'Erreur: ' + err.message;
+    }
   }
 
   /** Refuser un appel entrant */
@@ -182,24 +237,37 @@
 
   /** Traiter la réponse SDP distante (appel sortant) */
   async function handleRemoteAnswer(answer) {
-    if (!pc || pc.signalingState !== 'have-local-offer') return;
+    console.log('[Call] handleRemoteAnswer, pc:', !!pc, 'signalingState:', pc?.signalingState);
+    if (!pc || pc.signalingState !== 'have-local-offer') {
+      console.warn('[Call] Cannot set answer, state:', pc?.signalingState);
+      return;
+    }
     try {
+      status = 'connecting';
+      debugInfo = 'Answer reçue, connexion...';
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
       remoteDescSet = true;
-      // Appliquer les candidats ICE reçus avant la réponse
+      console.log('[Call] Remote desc (answer) set, flushing', candidateBuffer.length, 'buffered candidates');
       await flushCandidateBuffer();
-    } catch (e) { console.error('Erreur setRemoteDescription:', e); }
+    } catch (e) {
+      console.error('[Call] Erreur setRemoteDescription:', e);
+      debugInfo = 'Erreur SDP: ' + e.message;
+    }
   }
 
-  /** Ajouter un candidat ICE distant (bufferisé si la description distante n'est pas encore définie) */
+  /** Ajouter un candidat ICE distant (bufferisé si nécessaire) */
   async function handleRemoteIceCandidate(candidate) {
     if (!pc || !remoteDescSet) {
       candidateBuffer.push(candidate);
+      console.log('[Call] ICE candidate buffered (total:', candidateBuffer.length, ')');
       return;
     }
     try {
       await pc.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (e) { console.error('Erreur addIceCandidate:', e); }
+      console.log('[Call] ICE candidate ajouté');
+    } catch (e) {
+      console.error('[Call] Erreur addIceCandidate:', e);
+    }
   }
 
   /** Appliquer tous les candidats ICE en attente */
@@ -209,8 +277,9 @@
     for (const c of buffered) {
       try {
         await pc.addIceCandidate(new RTCIceCandidate(c));
-      } catch (e) { console.error('Erreur flush ICE candidate:', e); }
+      } catch (e) { console.error('[Call] Erreur flush ICE:', e); }
     }
+    console.log('[Call] Flushed', buffered.length, 'candidates');
   }
 
   /** Raccrocher / terminer l'appel */
@@ -220,19 +289,18 @@
     dispatch('end');
   }
 
-  /** Toggle audio on/off */
   function toggleAudio() {
     audioEnabled = !audioEnabled;
     localStream?.getAudioTracks().forEach(t => { t.enabled = audioEnabled; });
   }
 
-  /** Toggle vidéo on/off */
   function toggleVideo() {
     videoEnabled = !videoEnabled;
     localStream?.getVideoTracks().forEach(t => { t.enabled = videoEnabled; });
   }
 
   function startDurationTimer() {
+    if (durationInterval) return; // Éviter les doublons
     duration = 0;
     durationInterval = setInterval(() => { duration += 1; }, 1000);
   }
@@ -243,7 +311,6 @@
     return `${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
   }
 
-  /** Jouer une sonnerie (ton simple via Web Audio API) */
   function playRingtone() {
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -255,7 +322,6 @@
       gain.gain.value = 0.2;
       osc.start();
       ringtone = { ctx, osc, gain };
-      // Alterner la sonnerie
       const toggle = setInterval(() => {
         if (!ringtone) { clearInterval(toggle); return; }
         gain.gain.value = gain.gain.value > 0 ? 0 : 0.2;
@@ -273,10 +339,10 @@
     }
   }
 
-  /** Libérer toutes les ressources */
   function cleanup() {
     stopRingtone();
     clearInterval(durationInterval);
+    durationInterval = null;
     localStream?.getTracks().forEach(t => t.stop());
     pc?.close();
     pc = null;
@@ -302,32 +368,34 @@
         Appel en cours...
       {:else if status === 'ringing' && callState?.type === 'incoming'}
         Appel {callState?.video ? 'vidéo' : 'audio'} entrant
+      {:else if status === 'connecting'}
+        Connexion en cours...
       {:else if status === 'connected'}
         {formatDuration(duration)}
       {:else if status === 'ended'}
         Appel terminé
       {:else}
-        Connexion...
+        Initialisation...
       {/if}
     </p>
+    {#if debugInfo}
+      <p class="text-xs text-slate-500 mt-1">{debugInfo}</p>
+    {/if}
   </div>
 
-  <!-- Zone vidéo : les éléments existent toujours pour ne pas perdre srcObject -->
+  <!-- Zone vidéo : éléments stables pour ne pas perdre srcObject -->
   <div class="relative w-full max-w-2xl aspect-video mb-8 rounded-2xl overflow-hidden bg-black {videoEnabled && status === 'connected' ? '' : 'hidden'}">
-    <!-- Vidéo distante (plein cadre) -->
     <video bind:this={remoteVideo} autoplay playsinline class="w-full h-full object-cover"></video>
-    <!-- Vidéo locale (miniature en bas à droite) -->
     <video bind:this={localVideo} autoplay muted playsinline class="absolute bottom-3 right-3 w-32 h-24 rounded-lg object-cover border-2 border-white/20 shadow-lg"></video>
   </div>
-  <!-- Éléments audio cachés quand pas en mode vidéo -->
+  <!-- Élément audio pour les appels non-vidéo -->
   {#if !(videoEnabled && status === 'connected')}
-    <audio bind:this={remoteAudio} autoplay class="hidden"></audio>
+    <audio bind:this={remoteAudio} autoplay></audio>
   {/if}
 
   <!-- Boutons de contrôle -->
   <div class="flex items-center gap-4">
     {#if status === 'ringing' && callState?.type === 'incoming'}
-      <!-- Appel entrant : Accepter / Refuser -->
       <button on:click={rejectCall} class="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center text-white shadow-lg transition-colors" title="Refuser">
         <svg class="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
           <path d="M6 18L18 6M6 6l12 12"/>
@@ -339,7 +407,6 @@
         </svg>
       </button>
     {:else}
-      <!-- En appel ou en attente : contrôles -->
       <button on:click={toggleAudio} class="w-14 h-14 rounded-full {audioEnabled ? 'bg-slate-700 hover:bg-slate-600' : 'bg-red-500/20 hover:bg-red-500/30'} flex items-center justify-center text-white transition-colors" title="{audioEnabled ? 'Couper le micro' : 'Activer le micro'}">
         {#if audioEnabled}
           <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4M12 15a3 3 0 003-3V5a3 3 0 00-6 0v7a3 3 0 003 3z"/></svg>

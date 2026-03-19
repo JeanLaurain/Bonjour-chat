@@ -114,6 +114,11 @@
   function handleWsMsg(data) {
     const me = $auth.user?.id;
 
+    // Log tous les messages WS pour debug
+    if (data.type?.startsWith('call') || data.type === 'ice_candidate') {
+      console.log('[WS] ←', data.type, data);
+    }
+
     // Messages de chat
     if (data.type === 'new_message') {
       const m = data.data;
@@ -156,9 +161,8 @@
 
     // ── WebRTC Signaling ──
     if (data.type === 'call_offer') {
-      // Appel entrant
+      console.log('[WS] call_offer reçu de user', data.from_id);
       if (activeCall) {
-        // Déjà en appel → refuser automatiquement
         sendWs({ type: 'call_busy', target_id: data.from_id });
         return;
       }
@@ -173,11 +177,12 @@
     }
 
     if (data.type === 'call_answer' && callState?.type === 'outgoing') {
-      // La réponse est gérée par le CallModal via un callback
+      console.log('[WS] call_answer reçu, answer:', !!data.answer);
       callState = { ...callState, answer: data.answer };
     }
 
     if (data.type === 'ice_candidate' && (callState || activeCall)) {
+      console.log('[WS] ice_candidate reçu');
       // Accumuler les candidats ICE dans un array (jamais en écraser)
       if (callState) {
         const candidates = [...(callState.iceCandidates || []), data.candidate];
@@ -186,6 +191,7 @@
     }
 
     if (data.type === 'call_hangup' || data.type === 'call_reject' || data.type === 'call_busy') {
+      console.log('[WS] call end signal:', data.type);
       callState = null;
       activeCall = false;
     }
