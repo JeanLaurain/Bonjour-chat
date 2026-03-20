@@ -217,16 +217,29 @@
               Mot de passe
             </label>
             <div class="relative">
-              <input
-                id="password"
-                type={showPassword ? 'text' : 'password'}
-                bind:value={password}
-                placeholder="••••••"
-                required
-                minlength="6"
-                class="w-full px-4 py-3 pr-12 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
-                       focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
-              />
+              {#if showPassword}
+                <input
+                  id="password"
+                  type="text"
+                  bind:value={password}
+                  placeholder="••••••"
+                  required
+                  minlength="6"
+                  class="w-full px-4 py-3 pr-12 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
+                         focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
+                />
+              {:else}
+                <input
+                  id="password"
+                  type="password"
+                  bind:value={password}
+                  placeholder="••••••"
+                  required
+                  minlength="6"
+                  class="w-full px-4 py-3 pr-12 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
+                         focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
+                />
+              {/if}
               <!-- Bouton pour afficher / masquer le mot de passe -->
               <button
                 type="button"
@@ -256,16 +269,29 @@
               Nouveau mot de passe
             </label>
             <div class="relative">
-              <input
-                id="newPassword"
-                type={showNewPassword ? 'text' : 'password'}
-                bind:value={newPassword}
-                placeholder="••••••"
-                required
-                minlength="6"
-                class="w-full px-4 py-3 pr-12 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
-                       focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
-              />
+              {#if showNewPassword}
+                <input
+                  id="newPassword"
+                  type="text"
+                  bind:value={newPassword}
+                  placeholder="••••••"
+                  required
+                  minlength="6"
+                  class="w-full px-4 py-3 pr-12 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
+                         focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
+                />
+              {:else}
+                <input
+                  id="newPassword"
+                  type="password"
+                  bind:value={newPassword}
+                  placeholder="••••••"
+                  required
+                  minlength="6"
+                  class="w-full px-4 py-3 pr-12 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
+                         focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
+                />
+              {/if}
               <!-- Bouton pour afficher / masquer le nouveau mot de passe -->
               <button
                 type="button"
