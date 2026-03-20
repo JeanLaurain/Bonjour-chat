@@ -17,6 +17,10 @@
   let success = '';
   let loading = false;
 
+  // Afficher / masquer les mots de passe
+  let showPassword = false;
+  let showNewPassword = false;
+
   // Code de récupération affiché après inscription
   let showRecoveryCode = false;
   let generatedRecoveryCode = '';
@@ -212,32 +216,76 @@
             <label for="password" class="block text-sm font-medium text-slate-300 mb-1.5">
               Mot de passe
             </label>
-            <input
-              id="password"
-              type="password"
-              bind:value={password}
-              placeholder="••••••"
-              required
-              minlength="6"
-              class="w-full px-4 py-3 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
-                     focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
-            />
+            <div class="relative">
+              <input
+                id="password"
+                type={showPassword ? 'text' : 'password'}
+                bind:value={password}
+                placeholder="••••••"
+                required
+                minlength="6"
+                class="w-full px-4 py-3 pr-12 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
+                       focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
+              />
+              <!-- Bouton pour afficher / masquer le mot de passe -->
+              <button
+                type="button"
+                on:click={() => showPassword = !showPassword}
+                class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors"
+                tabindex="-1"
+                aria-label={showPassword ? 'Masquer le mot de passe' : 'Afficher le mot de passe'}
+              >
+                {#if showPassword}
+                  <!-- Icône œil barré (masquer) -->
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13.875 18.825A10.05 10.05 0 0112 19c-5 0-9.27-3.11-11-7.5a11.72 11.72 0 013.168-4.477M6.343 6.343A9.972 9.972 0 0112 5c5 0 9.27 3.11 11 7.5a11.72 11.72 0 01-4.168 4.477M6.343 6.343L3 3m3.343 3.343l2.829 2.829m4.243 4.243l2.829 2.829M6.343 6.343l11.314 11.314M14.121 14.121A3 3 0 009.879 9.879" />
+                  </svg>
+                {:else}
+                  <!-- Icône œil (afficher) -->
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                {/if}
+              </button>
+            </div>
           </div>
         {:else}
           <div class="animate-slide-up">
             <label for="newPassword" class="block text-sm font-medium text-slate-300 mb-1.5">
               Nouveau mot de passe
             </label>
-            <input
-              id="newPassword"
-              type="password"
-              bind:value={newPassword}
-              placeholder="••••••"
-              required
-              minlength="6"
-              class="w-full px-4 py-3 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
-                     focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
-            />
+            <div class="relative">
+              <input
+                id="newPassword"
+                type={showNewPassword ? 'text' : 'password'}
+                bind:value={newPassword}
+                placeholder="••••••"
+                required
+                minlength="6"
+                class="w-full px-4 py-3 pr-12 bg-slate-900/50 border border-slate-600/50 rounded-xl text-white placeholder-slate-500
+                       focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 transition-all"
+              />
+              <!-- Bouton pour afficher / masquer le nouveau mot de passe -->
+              <button
+                type="button"
+                on:click={() => showNewPassword = !showNewPassword}
+                class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors"
+                tabindex="-1"
+                aria-label={showNewPassword ? 'Masquer le mot de passe' : 'Afficher le mot de passe'}
+              >
+                {#if showNewPassword}
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13.875 18.825A10.05 10.05 0 0112 19c-5 0-9.27-3.11-11-7.5a11.72 11.72 0 013.168-4.477M6.343 6.343A9.972 9.972 0 0112 5c5 0 9.27 3.11 11 7.5a11.72 11.72 0 01-4.168 4.477M6.343 6.343L3 3m3.343 3.343l2.829 2.829m4.243 4.243l2.829 2.829M6.343 6.343l11.314 11.314M14.121 14.121A3 3 0 009.879 9.879" />
+                  </svg>
+                {:else}
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                {/if}
+              </button>
+            </div>
           </div>
         {/if}
 
