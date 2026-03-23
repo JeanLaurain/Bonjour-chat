@@ -1,10 +1,15 @@
 /**
  * Client API — Toutes les requêtes HTTP vers le backend Bonjour.
- * Gère automatiquement le token JWT dans les headers.
+ * Gère automatiquement le token JWT dans les headers et le renouvellement
+ * via refresh token en cas d'expiration (401).
  */
 
 function getToken() {
   return localStorage.getItem('token');
+}
+
+function getRefreshToken() {
+  return localStorage.getItem('refresh_token');
 }
 
 function authHeaders(extra = {}) {
@@ -16,8 +21,80 @@ function authHeaders(extra = {}) {
   };
 }
 
+/** Flag pour éviter plusieurs refresh simultanés */
+let isRefreshing = false;
+/** File d'attente des requêtes en attente du refresh */
+let refreshQueue = [];
+
+/**
+ * Tente de renouveler l'access token via le refresh token.
+ * En cas de succès, met à jour le localStorage et relance les requêtes en attente.
+ */
+async function tryRefreshToken() {
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) throw new Error('No refresh token');
+
+  const res = await fetch('/auth/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+
+  if (!res.ok) {
+    // Refresh token invalide ou expiré → déconnexion
+    localStorage.removeItem('token');
+    localStorage.removeItem('refresh_token');
+    localStorage.removeItem('user');
+    throw new Error('Refresh token expired');
+  }
+
+  const data = await res.json();
+  // Stocker les nouveaux tokens
+  localStorage.setItem('token', data.token);
+  localStorage.setItem('refresh_token', data.refresh_token);
+  if (data.user) localStorage.setItem('user', JSON.stringify(data.user));
+  return data.token;
+}
+
+/**
+ * Requête HTTP avec renouvellement automatique du token.
+ * Si le serveur répond 401, tente un refresh puis rejoue la requête.
+ */
 async function request(url, options = {}) {
-  const res = await fetch(url, options);
+  let res = await fetch(url, options);
+
+  // Si 401 et qu'on a un refresh token, tenter le renouvellement
+  if (res.status === 401 && getRefreshToken()) {
+    if (!isRefreshing) {
+      isRefreshing = true;
+      try {
+        const newToken = await tryRefreshToken();
+        // Débloquer toutes les requêtes en attente
+        refreshQueue.forEach(cb => cb(newToken));
+        refreshQueue = [];
+      } catch {
+        // Refresh échoué → déconnecter l'utilisateur
+        refreshQueue.forEach(cb => cb(null));
+        refreshQueue = [];
+        window.location.reload();
+        throw new Error('Session expired');
+      } finally {
+        isRefreshing = false;
+      }
+    } else {
+      // Un refresh est déjà en cours, attendre qu'il finisse
+      const newToken = await new Promise(resolve => refreshQueue.push(resolve));
+      if (!newToken) throw new Error('Session expired');
+    }
+
+    // Rejouer la requête avec le nouveau token
+    const newHeaders = { ...options.headers };
+    if (newHeaders['Authorization'] || newHeaders['authorization']) {
+      newHeaders['Authorization'] = `Bearer ${getToken()}`;
+    }
+    res = await fetch(url, { ...options, headers: newHeaders });
+  }
+
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || body.message || `HTTP ${res.status}`);

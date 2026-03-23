@@ -81,8 +81,16 @@ CREATE TABLE IF NOT EXISTS group_messages (
 CREATE INDEX idx_group_messages_group ON group_messages(group_id, created_at);
 CREATE INDEX idx_group_members_user ON group_members(user_id);
 
--- Migration : ajouter recovery_code_hash si la colonne n'existe pas encore
--- (MySQL n'a pas IF NOT EXISTS pour ALTER TABLE, ce sera ignoré si déjà présent lors de la création)
+-- Table des refresh tokens (sessions longues, 7 jours)
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    token_hash VARCHAR(64) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE KEY uq_token_hash (token_hash)
+);
 
--- Migration : ajouter les colonnes reply_to_id et original_filename
--- Ces ALTER TABLE échoueront silencieusement si les colonnes existent déjà (nouveau schéma)
+CREATE INDEX idx_refresh_tokens_user ON refresh_tokens(user_id);
+CREATE INDEX idx_refresh_tokens_expires ON refresh_tokens(expires_at);

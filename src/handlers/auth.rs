@@ -1,15 +1,19 @@
-//! Handlers d'authentification (inscription, connexion, profil).
+//! Handlers d'authentification (inscription, connexion, refresh, logout, profil).
 //!
-//! Les endpoints register, login et reset-password sont publics.
-//! Les endpoints de profil (get_me, update_profile) nécessitent un JWT.
+//! Les endpoints register, login, reset-password et refresh sont publics.
+//! Les endpoints de profil (get_me, update_profile) et logout nécessitent un JWT.
 
 use axum::{extract::{Request, State}, Json};
 use axum::http::header;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::config::AppState;
 use crate::errors::{AppError, AuthResponse, ErrorResponse};
-use crate::middleware::auth::{create_token, verify_token, Claims};
+use crate::middleware::auth::{
+    create_token, verify_token, Claims,
+    create_refresh_token, verify_and_rotate_refresh_token, delete_all_refresh_tokens,
+};
 use crate::models::user::{self, CreateUser, LoginUser, ResetPasswordRequest, UpdateProfileRequest, UserResponse};
 
 /// Extrait les claims JWT depuis le header Authorization de la requête.
@@ -85,6 +89,9 @@ pub async fn register(
     // Génération immédiate d'un JWT pour que l'utilisateur soit connecté
     let token = create_token(user_id as i32, &payload.username, &state.jwt_secret)?;
 
+    // Génération du refresh token (7 jours) pour renouveler la session
+    let refresh_token = create_refresh_token(&state.db, user_id as i32).await?;
+
     Ok(Json(json!({
         "message": "User registered successfully",
         "user": {
@@ -94,6 +101,7 @@ pub async fn register(
             "profile_picture_url": Option::<String>::None
         },
         "token": token,
+        "refresh_token": refresh_token,
         "recovery_code": recovery_code
     })))
 }
@@ -130,13 +138,17 @@ pub async fn login(
     // Génération du token JWT
     let token = create_token(user.id, &user.username, &state.jwt_secret)?;
 
+    // Génération du refresh token (7 jours)
+    let refresh_token = create_refresh_token(&state.db, user.id).await?;
+
     // Conversion vers UserResponse (sans le password_hash)
     let user_response: UserResponse = user.into();
 
     Ok(Json(json!({
         "message": "Login successful",
         "user": user_response,
-        "token": token
+        "token": token,
+        "refresh_token": refresh_token
     })))
 }
 
@@ -259,5 +271,78 @@ pub async fn update_profile(
     Ok(Json(json!({
         "message": "Profile updated",
         "user": user_response
+    })))
+}
+
+/// Corps de la requête pour renouveler le token.
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct RefreshRequest {
+    pub refresh_token: String,
+}
+
+/// Renouvelle l'access token à l'aide d'un refresh token valide.
+///
+/// Le refresh token est à usage unique (rotation) : un nouveau refresh token
+/// est retourné à chaque appel. L'ancien est invalidé.
+#[utoipa::path(
+    post,
+    path = "/auth/refresh",
+    tag = "Authentication",
+    request_body = RefreshRequest,
+    responses(
+        (status = 200, description = "Tokens renouvelés", body = AuthResponse),
+        (status = 401, description = "Refresh token invalide ou expiré", body = ErrorResponse),
+    )
+)]
+pub async fn refresh(
+    State(state): State<AppState>,
+    Json(payload): Json<RefreshRequest>,
+) -> Result<Json<Value>, AppError> {
+    // Vérifier et supprimer l'ancien refresh token (rotation)
+    let user_id = verify_and_rotate_refresh_token(&state.db, &payload.refresh_token).await?;
+
+    // Récupérer l'utilisateur pour inclure le username dans le JWT
+    let user = user::find_by_id(&state.db, user_id, &state.encryption_key)
+        .await?
+        .ok_or(AppError::UserNotFound)?;
+
+    // Générer un nouvel access token (1h) et un nouveau refresh token (7j)
+    let token = create_token(user.id, &user.username, &state.jwt_secret)?;
+    let new_refresh_token = create_refresh_token(&state.db, user.id).await?;
+
+    let user_response: UserResponse = user.into();
+
+    Ok(Json(json!({
+        "message": "Token refreshed",
+        "user": user_response,
+        "token": token,
+        "refresh_token": new_refresh_token
+    })))
+}
+
+/// Déconnexion : supprime tous les refresh tokens de l'utilisateur.
+///
+/// Invalide toutes les sessions actives (logout global).
+#[utoipa::path(
+    post,
+    path = "/auth/logout",
+    tag = "Authentication",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Déconnexion réussie"),
+        (status = 401, description = "Non authentifié", body = ErrorResponse),
+    )
+)]
+pub async fn logout(
+    State(state): State<AppState>,
+    req: Request,
+) -> Result<Json<Value>, AppError> {
+    let claims = extract_claims(&req, &state.jwt_secret)?;
+
+    // Supprimer tous les refresh tokens de l'utilisateur
+    delete_all_refresh_tokens(&state.db, claims.sub).await?;
+
+    Ok(Json(json!({
+        "message": "Logged out successfully"
     })))
 }

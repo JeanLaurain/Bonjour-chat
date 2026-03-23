@@ -37,9 +37,9 @@
           generatedRecoveryCode = data.recovery_code;
           showRecoveryCode = true;
           // Stocker le token pour se connecter après
-          window._pendingAuth = { token: data.token, user: data.user };
+          window._pendingAuth = { token: data.token, user: data.user, refreshToken: data.refresh_token };
         } else {
-          auth.login(data.token, data.user);
+          auth.login(data.token, data.user, data.refresh_token);
         }
       } else if (mode === 'forgot') {
         await api.resetPassword(username, recoveryCode, newPassword);
@@ -47,7 +47,7 @@
         setTimeout(() => { mode = 'login'; success = ''; }, 2000);
       } else {
         const data = await api.login(username, password);
-        auth.login(data.token, data.user);
+        auth.login(data.token, data.user, data.refresh_token);
       }
     } catch (e) {
       error = e.message || 'Une erreur est survenue';
@@ -59,7 +59,7 @@
   function continueAfterRecovery() {
     showRecoveryCode = false;
     if (window._pendingAuth) {
-      auth.login(window._pendingAuth.token, window._pendingAuth.user);
+      auth.login(window._pendingAuth.token, window._pendingAuth.user, window._pendingAuth.refreshToken);
       delete window._pendingAuth;
     }
   }

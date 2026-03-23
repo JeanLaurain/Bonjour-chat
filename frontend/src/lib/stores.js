@@ -6,15 +6,18 @@ import { writable, get } from 'svelte/store';
 // ── Auth Store (persisté dans localStorage) ───────────
 function createAuthStore() {
   const token = localStorage.getItem('token');
+  const refreshToken = localStorage.getItem('refresh_token');
   const user = JSON.parse(localStorage.getItem('user') || 'null');
-  const { subscribe, set } = writable({ token, user, isAuthenticated: !!token });
+  const { subscribe, set } = writable({ token, refreshToken, user, isAuthenticated: !!token });
 
   return {
     subscribe,
-    login: (token, user) => {
+    /** Stocke les tokens et l'utilisateur après login/register */
+    login: (token, user, refreshToken) => {
       localStorage.setItem('token', token);
+      if (refreshToken) localStorage.setItem('refresh_token', refreshToken);
       localStorage.setItem('user', JSON.stringify(user));
-      set({ token, user, isAuthenticated: true });
+      set({ token, refreshToken, user, isAuthenticated: true });
     },
     /** Met à jour les données utilisateur (ex: après changement de photo de profil) */
     updateUser: (userData) => {
@@ -22,12 +25,14 @@ function createAuthStore() {
       const merged = { ...stored, ...userData };
       localStorage.setItem('user', JSON.stringify(merged));
       const token = localStorage.getItem('token');
-      set({ token, user: merged, isAuthenticated: !!token });
+      const refreshToken = localStorage.getItem('refresh_token');
+      set({ token, refreshToken, user: merged, isAuthenticated: !!token });
     },
     logout: () => {
       localStorage.removeItem('token');
+      localStorage.removeItem('refresh_token');
       localStorage.removeItem('user');
-      set({ token: null, user: null, isAuthenticated: false });
+      set({ token: null, refreshToken: null, user: null, isAuthenticated: false });
     },
   };
 }
