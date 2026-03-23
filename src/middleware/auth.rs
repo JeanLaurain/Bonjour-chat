@@ -1,166 +1,126 @@
-//! Middleware et utilitaires d'authentification JWT.
+//! Middleware d'authentification JWT et gestion des refresh tokens.
 //!
-//! Gère la création et la vérification des tokens JWT (access + refresh).
-//! - Access token : durée de vie de 1 heure (usage courant des requêtes API).
-//! - Refresh token : durée de vie de 7 jours (permet de renouveler l'access token).
+//! Fournit les fonctions de création/vérification de tokens JWT
+//! et la gestion sécurisée des refresh tokens avec rotation.
 
-use axum::{
-    extract::{Request, State},
-    http::header,
-    middleware::Next,
-    response::Response,
-};
+use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
+use mongodb::Database;
+use bson::doc;
+use uuid::Uuid;
 
-use crate::config::AppState;
 use crate::errors::AppError;
 
-/// Claims JWT embarqués dans chaque access token.
-/// - `sub` : identifiant unique de l'utilisateur
-/// - `username` : nom d'utilisateur (pour éviter un appel DB supplémentaire)
-/// - `exp` : timestamp d'expiration (Unix epoch)
+/// Claims contenus dans le token JWT
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
-    pub sub: i32,
+    pub sub: i32,        // user_id
     pub username: String,
-    pub exp: usize,
+    pub exp: usize,      // expiration timestamp
+    pub iat: usize,      // issued at timestamp
 }
 
-/// Crée un access token JWT signé avec HS256, valide 1 heure.
-pub fn create_token(user_id: i32, username: &str, secret: &str) -> Result<String, AppError> {
-    let expiration = chrono::Utc::now()
-        .checked_add_signed(chrono::Duration::hours(1))
-        .expect("valid timestamp")
-        .timestamp() as usize;
-
+/// Crée un token JWT signé avec la clé secrète (durée de vie : 24h)
+pub fn create_token(user_id: i32, username: &str, jwt_secret: &str) -> Result<String, AppError> {
+    let now = Utc::now();
     let claims = Claims {
         sub: user_id,
         username: username.to_string(),
-        exp: expiration,
+        iat: now.timestamp() as usize,
+        exp: (now + Duration::hours(24)).timestamp() as usize,
     };
 
-    let token = encode(
+    encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )?;
-
-    Ok(token)
+        &EncodingKey::from_secret(jwt_secret.as_bytes()),
+    )
+    .map_err(|e| AppError::Auth(format!("Erreur création token: {e}")))
 }
 
-/// Vérifie et décode un access token JWT.
-/// Retourne les claims si le token est valide et non expiré.
-pub fn verify_token(token: &str, secret: &str) -> Result<Claims, AppError> {
-    let token_data = decode::<Claims>(
+/// Vérifie et décode un token JWT
+pub fn verify_token(token: &str, jwt_secret: &str) -> Result<Claims, AppError> {
+    decode::<Claims>(
         token,
-        &DecodingKey::from_secret(secret.as_bytes()),
+        &DecodingKey::from_secret(jwt_secret.as_bytes()),
         &Validation::default(),
-    )?;
-
-    Ok(token_data.claims)
+    )
+    .map(|data| data.claims)
+    .map_err(|e| AppError::Auth(format!("Token invalide: {e}")))
 }
 
-/// Génère un refresh token aléatoire (UUID v4) et le stocke hashé en base.
-/// Retourne le token brut (à envoyer au client) — seul le hash est persisté.
-pub async fn create_refresh_token(
-    db: &sqlx::MySqlPool,
-    user_id: i32,
-) -> Result<String, AppError> {
-    let raw_token = uuid::Uuid::new_v4().to_string();
-    let token_hash = hex::encode(Sha256::digest(raw_token.as_bytes()));
-    let expires_at = chrono::Utc::now() + chrono::Duration::days(7);
+// ───────── Refresh Tokens ─────────
 
-    sqlx::query("INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)")
-        .bind(user_id)
-        .bind(&token_hash)
-        .bind(expires_at.naive_utc())
-        .execute(db)
+/// Hash le refresh token (SHA-256) avant stockage en base
+fn hash_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Génère un refresh token, le stocke en base (hashé), et retourne le token brut.
+/// Durée de vie : 7 jours. Le token est à usage unique (rotation).
+pub async fn create_refresh_token(db: &Database, user_id: i32) -> Result<String, AppError> {
+    let raw_token = Uuid::new_v4().to_string();
+    let token_hash = hash_token(&raw_token);
+    let expires_at = Utc::now() + Duration::days(7);
+    let new_id = crate::db::next_id(db, "refresh_tokens").await?;
+
+    db.collection::<bson::Document>("refresh_tokens")
+        .insert_one(
+            doc! {
+                "_id": new_id,
+                "user_id": user_id,
+                "token_hash": &token_hash,
+                "expires_at": bson::DateTime::from_chrono(expires_at),
+                "created_at": bson::DateTime::from_chrono(Utc::now()),
+            },
+            None,
+        )
         .await?;
 
     Ok(raw_token)
 }
 
-/// Valide un refresh token : vérifie qu'il existe, n'est pas expiré,
-/// puis le supprime (rotation — un refresh token n'est utilisable qu'une fois).
-/// Retourne le user_id associé si tout est OK.
+/// Valide et consomme un refresh token (rotation : supprimé après usage).
+/// Retourne le user_id si le token est valide et non expiré.
 pub async fn verify_and_rotate_refresh_token(
-    db: &sqlx::MySqlPool,
+    db: &Database,
     raw_token: &str,
 ) -> Result<i32, AppError> {
-    let token_hash = hex::encode(Sha256::digest(raw_token.as_bytes()));
+    let token_hash = hash_token(raw_token);
 
-    // Récupérer le refresh token correspondant
-    let row: Option<(i32, chrono::NaiveDateTime)> = sqlx::query_as(
-        "SELECT user_id, expires_at FROM refresh_tokens WHERE token_hash = ?"
-    )
-        .bind(&token_hash)
-        .fetch_optional(db)
-        .await?;
-
-    let (user_id, expires_at) = row.ok_or(AppError::Unauthorized)?;
-
-    // Vérifier l'expiration
-    if expires_at < chrono::Utc::now().naive_utc() {
-        // Supprimer le token expiré
-        sqlx::query("DELETE FROM refresh_tokens WHERE token_hash = ?")
-            .bind(&token_hash)
-            .execute(db)
-            .await?;
-        return Err(AppError::Unauthorized);
+    #[derive(serde::Deserialize)]
+    struct RefreshToken {
+        user_id: i32,
+        #[serde(deserialize_with = "bson::serde_helpers::chrono_datetime_as_bson_datetime::deserialize")]
+        expires_at: chrono::DateTime<Utc>,
     }
 
-    // Supprimer l'ancien token (rotation : chaque refresh token est à usage unique)
-    sqlx::query("DELETE FROM refresh_tokens WHERE token_hash = ?")
-        .bind(&token_hash)
-        .execute(db)
+    // Suppression atomique : find_one_and_delete empêche la réutilisation
+    let result = db
+        .collection::<RefreshToken>("refresh_tokens")
+        .find_one_and_delete(doc! { "token_hash": &token_hash }, None)
         .await?;
 
-    Ok(user_id)
+    match result {
+        Some(rt) => {
+            if rt.expires_at < Utc::now() {
+                Err(AppError::Auth("Refresh token expiré".to_string()))
+            } else {
+                Ok(rt.user_id)
+            }
+        }
+        None => Err(AppError::Auth("Refresh token invalide".to_string())),
+    }
 }
 
-/// Supprime tous les refresh tokens d'un utilisateur (logout global).
-pub async fn delete_all_refresh_tokens(
-    db: &sqlx::MySqlPool,
-    user_id: i32,
-) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM refresh_tokens WHERE user_id = ?")
-        .bind(user_id)
-        .execute(db)
-        .await?;
-    Ok(())
-}
-
-/// Nettoie les refresh tokens expirés (maintenance).
-pub async fn cleanup_expired_tokens(db: &sqlx::MySqlPool) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM refresh_tokens WHERE expires_at < NOW()")
-        .execute(db)
+/// Supprime tous les refresh tokens d'un utilisateur (logout global)
+pub async fn delete_all_refresh_tokens(db: &Database, user_id: i32) -> Result<(), AppError> {
+    db.collection::<bson::Document>("refresh_tokens")
+        .delete_many(doc! { "user_id": user_id }, None)
         .await?;
     Ok(())
-}
-
-/// Middleware Axum générique pour protéger des routes.
-/// Extrait le header `Authorization: Bearer <token>`, vérifie le JWT,
-/// puis injecte les Claims dans les extensions de la requête.
-pub async fn auth_middleware(
-    State(state): State<AppState>,
-    mut req: Request,
-    next: Next,
-) -> Result<Response, AppError> {
-    let auth_header = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .ok_or(AppError::Unauthorized)?;
-
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or(AppError::Unauthorized)?;
-
-    let claims = verify_token(token, &state.jwt_secret)?;
-
-    req.extensions_mut().insert(claims);
-
-    Ok(next.run(req).await)
 }

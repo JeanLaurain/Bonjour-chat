@@ -1,27 +1,31 @@
-//! Modèle de groupe et opérations de base de données associées.
+//! Modèle de groupe et opérations MongoDB.
 //!
 //! Gère les groupes de conversation multi-utilisateurs,
 //! leurs membres et les messages de groupe.
-//! Les noms de groupe et contenus de messages sont chiffrés avec AES-256-GCM.
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::MySqlPool;
+use mongodb::Database;
+use bson::doc;
 use utoipa::ToSchema;
+use futures_util::TryStreamExt;
 
 use crate::crypto;
+use crate::errors::AppError;
 
 /// Représentation d'un groupe en base de données
-#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Group {
+    #[serde(alias = "_id")]
     pub id: i32,
     pub name: String,
     pub creator_id: i32,
-    pub created_at: NaiveDateTime,
+    #[serde(deserialize_with = "bson::serde_helpers::chrono_datetime_as_bson_datetime::deserialize")]
+    pub created_at: DateTime<Utc>,
 }
 
 /// Membre d'un groupe avec son nom d'utilisateur
-#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct GroupMember {
     pub user_id: i32,
     pub username: String,
@@ -29,7 +33,7 @@ pub struct GroupMember {
 }
 
 /// Message dans un groupe avec le nom de l'expéditeur
-#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct GroupMessage {
     pub id: i32,
     pub group_id: i32,
@@ -37,18 +41,19 @@ pub struct GroupMessage {
     pub sender_username: String,
     pub content: String,
     pub message_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub original_filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_id: Option<i32>,
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Corps de requête pour créer un groupe
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateGroupRequest {
-    /// Nom du groupe (1–100 caractères)
     pub name: String,
-    /// IDs des membres à ajouter (le créateur est ajouté automatiquement)
     pub member_ids: Vec<i32>,
 }
 
@@ -67,7 +72,7 @@ fn default_text() -> String {
     "text".to_string()
 }
 
-/// Corps de requête pour ajouter des membres à un groupe
+/// Corps de requête pour ajouter des membres
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AddMembersRequest {
     pub user_ids: Vec<i32>,
@@ -76,59 +81,70 @@ pub struct AddMembersRequest {
 /// Corps de requête pour renommer un groupe
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RenameGroupRequest {
-    /// Nouveau nom du groupe (1–100 caractères)
     pub name: String,
 }
 
 /// Aperçu d'un groupe pour la liste des conversations
-#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct GroupPreview {
     pub id: i32,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_message: Option<String>,
-    pub last_message_at: Option<NaiveDateTime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_message_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_sender: Option<String>,
     pub member_count: i64,
-    /// Nombre de messages non lus dans le groupe
     pub unread_count: i64,
 }
 
-/// Crée un groupe et ajoute les membres.
-/// Le nom du groupe est chiffré avant l'insertion.
+/// Struct interne pour lire un username depuis MongoDB
+#[derive(Deserialize)]
+struct UserBasic {
+    username: String,
+}
+
+/// Crée un groupe et ajoute les membres (nom chiffré).
 pub async fn create_group(
-    pool: &MySqlPool,
+    db: &Database,
     name: &str,
     creator_id: i32,
     member_ids: &[i32],
     key: &[u8; 32],
-) -> Result<i32, sqlx::Error> {
+) -> Result<i32, AppError> {
     let encrypted_name = crypto::encrypt(name, key).unwrap_or_else(|_| name.to_string());
+    let group_id = crate::db::next_id(db, "groups").await?;
 
-    let result = sqlx::query("INSERT INTO `groups` (name, creator_id) VALUES (?, ?)")
-        .bind(&encrypted_name)
-        .bind(creator_id)
-        .execute(pool)
+    db.collection::<bson::Document>("groups")
+        .insert_one(
+            doc! {
+                "_id": group_id,
+                "name": &encrypted_name,
+                "creator_id": creator_id,
+                "created_at": bson::DateTime::from_chrono(Utc::now()),
+            },
+            None,
+        )
         .await?;
 
-    let group_id = result.last_insert_id() as i32;
-
     // Ajouter le créateur comme admin
-    sqlx::query("INSERT INTO group_members (group_id, user_id, role) VALUES (?, ?, 'admin')")
-        .bind(group_id)
-        .bind(creator_id)
-        .execute(pool)
+    db.collection::<bson::Document>("group_members")
+        .insert_one(
+            doc! { "group_id": group_id, "user_id": creator_id, "role": "admin" },
+            None,
+        )
         .await?;
 
     // Ajouter les autres membres
     for &member_id in member_ids {
         if member_id != creator_id {
-            sqlx::query(
-                "INSERT INTO group_members (group_id, user_id, role) VALUES (?, ?, 'member')",
-            )
-            .bind(group_id)
-            .bind(member_id)
-            .execute(pool)
-            .await?;
+            db.collection::<bson::Document>("group_members")
+                .insert_one(
+                    doc! { "group_id": group_id, "user_id": member_id, "role": "member" },
+                    None,
+                )
+                .await?;
         }
     }
 
@@ -136,13 +152,15 @@ pub async fn create_group(
 }
 
 /// Récupère les détails d'un groupe et déchiffre le nom
-pub async fn get_group(pool: &MySqlPool, group_id: i32, key: &[u8; 32]) -> Result<Option<Group>, sqlx::Error> {
-    let group = sqlx::query_as::<_, Group>(
-        "SELECT id, name, creator_id, created_at FROM `groups` WHERE id = ?",
-    )
-    .bind(group_id)
-    .fetch_optional(pool)
-    .await?;
+pub async fn get_group(
+    db: &Database,
+    group_id: i32,
+    key: &[u8; 32],
+) -> Result<Option<Group>, AppError> {
+    let group = db
+        .collection::<Group>("groups")
+        .find_one(doc! { "_id": group_id }, None)
+        .await?;
 
     Ok(group.map(|mut g| {
         g.name = crypto::try_decrypt(&g.name, key);
@@ -151,73 +169,90 @@ pub async fn get_group(pool: &MySqlPool, group_id: i32, key: &[u8; 32]) -> Resul
 }
 
 /// Vérifie si un utilisateur est membre d'un groupe
-pub async fn is_member(
-    pool: &MySqlPool,
-    group_id: i32,
-    user_id: i32,
-) -> Result<bool, sqlx::Error> {
-    let row = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM group_members WHERE group_id = ? AND user_id = ?",
-    )
-    .bind(group_id)
-    .bind(user_id)
-    .fetch_one(pool)
-    .await?;
-    Ok(row > 0)
+pub async fn is_member(db: &Database, group_id: i32, user_id: i32) -> Result<bool, AppError> {
+    let count = db
+        .collection::<bson::Document>("group_members")
+        .count_documents(doc! { "group_id": group_id, "user_id": user_id }, None)
+        .await?;
+    Ok(count > 0)
 }
 
 /// Renomme un groupe (chiffre le nouveau nom)
 pub async fn rename_group(
-    pool: &MySqlPool,
+    db: &Database,
     group_id: i32,
     new_name: &str,
     key: &[u8; 32],
-) -> Result<(), sqlx::Error> {
+) -> Result<(), AppError> {
     let encrypted_name = crypto::encrypt(new_name, key).unwrap_or_else(|_| new_name.to_string());
-    sqlx::query("UPDATE `groups` SET name = ? WHERE id = ?")
-        .bind(&encrypted_name)
-        .bind(group_id)
-        .execute(pool)
+    db.collection::<bson::Document>("groups")
+        .update_one(
+            doc! { "_id": group_id },
+            doc! { "$set": { "name": &encrypted_name } },
+            None,
+        )
         .await?;
     Ok(())
 }
 
-/// Liste les membres d'un groupe avec leurs noms d'utilisateur déchiffrés
+/// Liste les membres d'un groupe avec leurs noms déchiffrés
 pub async fn get_members(
-    pool: &MySqlPool,
+    db: &Database,
     group_id: i32,
     key: &[u8; 32],
-) -> Result<Vec<GroupMember>, sqlx::Error> {
-    let mut members = sqlx::query_as::<_, GroupMember>(
-        "SELECT gm.user_id, u.username, gm.role \
-         FROM group_members gm \
-         JOIN users u ON u.id = gm.user_id \
-         WHERE gm.group_id = ? \
-         ORDER BY gm.role ASC, u.username ASC",
-    )
-    .bind(group_id)
-    .fetch_all(pool)
-    .await?;
+) -> Result<Vec<GroupMember>, AppError> {
+    #[derive(Deserialize)]
+    struct MemberRecord {
+        user_id: i32,
+        role: String,
+    }
 
-    // Déchiffrer les noms d'utilisateur
-    for member in &mut members {
-        member.username = crypto::try_decrypt(&member.username, key);
+    let cursor = db
+        .collection::<MemberRecord>("group_members")
+        .find(doc! { "group_id": group_id }, None)
+        .await?;
+    let records: Vec<MemberRecord> = cursor.try_collect().await?;
+
+    let mut members = Vec::new();
+    for record in records {
+        let user = db
+            .collection::<UserBasic>("users")
+            .find_one(doc! { "_id": record.user_id }, None)
+            .await?;
+
+        let username = match user {
+            Some(u) => crypto::try_decrypt(&u.username, key),
+            None => "Unknown".to_string(),
+        };
+
+        members.push(GroupMember {
+            user_id: record.user_id,
+            username,
+            role: record.role,
+        });
     }
 
     Ok(members)
 }
 
 /// Récupère les IDs de tous les membres d'un groupe
-pub async fn get_member_ids(pool: &MySqlPool, group_id: i32) -> Result<Vec<i32>, sqlx::Error> {
-    sqlx::query_scalar::<_, i32>("SELECT user_id FROM group_members WHERE group_id = ?")
-        .bind(group_id)
-        .fetch_all(pool)
-        .await
+pub async fn get_member_ids(db: &Database, group_id: i32) -> Result<Vec<i32>, AppError> {
+    #[derive(Deserialize)]
+    struct MemberIdOnly {
+        user_id: i32,
+    }
+
+    let cursor = db
+        .collection::<MemberIdOnly>("group_members")
+        .find(doc! { "group_id": group_id }, None)
+        .await?;
+    let records: Vec<MemberIdOnly> = cursor.try_collect().await?;
+    Ok(records.into_iter().map(|r| r.user_id).collect())
 }
 
 /// Insère un message chiffré dans un groupe et retourne son ID
 pub async fn create_group_message(
-    pool: &MySqlPool,
+    db: &Database,
     group_id: i32,
     sender_id: i32,
     content: &str,
@@ -226,149 +261,297 @@ pub async fn create_group_message(
     original_filename: Option<&str>,
     reply_to_id: Option<i32>,
     key: &[u8; 32],
-) -> Result<u64, sqlx::Error> {
+) -> Result<i32, AppError> {
     let encrypted_content = crypto::encrypt(content, key).unwrap_or_else(|_| content.to_string());
+    let new_id = crate::db::next_id(db, "group_messages").await?;
 
-    let result = sqlx::query(
-        "INSERT INTO group_messages (group_id, sender_id, content, message_type, image_url, original_filename, reply_to_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(group_id)
-    .bind(sender_id)
-    .bind(&encrypted_content)
-    .bind(message_type)
-    .bind(image_url)
-    .bind(original_filename)
-    .bind(reply_to_id)
-    .execute(pool)
-    .await?;
+    let mut document = doc! {
+        "_id": new_id,
+        "group_id": group_id,
+        "sender_id": sender_id,
+        "content": &encrypted_content,
+        "message_type": message_type,
+        "created_at": bson::DateTime::from_chrono(Utc::now()),
+    };
 
-    Ok(result.last_insert_id())
+    if let Some(url) = image_url {
+        document.insert("image_url", url);
+    }
+    if let Some(name) = original_filename {
+        document.insert("original_filename", name);
+    }
+    if let Some(reply_id) = reply_to_id {
+        document.insert("reply_to_id", reply_id);
+    }
+
+    db.collection::<bson::Document>("group_messages")
+        .insert_one(document, None)
+        .await?;
+
+    Ok(new_id)
 }
 
-/// Récupère les messages d'un groupe avec pagination.
-/// Déchiffre le contenu et les noms d'expéditeur.
+/// Récupère les messages d'un groupe avec pagination (déchiffrés).
 pub async fn get_group_messages(
-    pool: &MySqlPool,
+    db: &Database,
     group_id: i32,
     before_id: Option<i32>,
     limit: i64,
     key: &[u8; 32],
-) -> Result<Vec<GroupMessage>, sqlx::Error> {
-    let mut messages = if let Some(bid) = before_id {
-        sqlx::query_as::<_, GroupMessage>(
-            "SELECT gm.id, gm.group_id, gm.sender_id, u.username AS sender_username, \
-             gm.content, gm.message_type, gm.image_url, gm.original_filename, gm.reply_to_id, gm.created_at \
-             FROM group_messages gm \
-             JOIN users u ON u.id = gm.sender_id \
-             WHERE gm.group_id = ? AND gm.id < ? \
-             ORDER BY gm.id DESC LIMIT ?",
-        )
-        .bind(group_id).bind(bid).bind(limit)
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query_as::<_, GroupMessage>(
-            "SELECT gm.id, gm.group_id, gm.sender_id, u.username AS sender_username, \
-             gm.content, gm.message_type, gm.image_url, gm.original_filename, gm.reply_to_id, gm.created_at \
-             FROM group_messages gm \
-             JOIN users u ON u.id = gm.sender_id \
-             WHERE gm.group_id = ? \
-             ORDER BY gm.id DESC LIMIT ?",
-        )
-        .bind(group_id).bind(limit)
-        .fetch_all(pool)
-        .await?
-    };
+) -> Result<Vec<GroupMessage>, AppError> {
+    let mut filter = doc! { "group_id": group_id };
+    if let Some(bid) = before_id {
+        filter.insert("_id", doc! { "$lt": bid });
+    }
+
+    let options = mongodb::options::FindOptions::builder()
+        .sort(doc! { "_id": -1 })
+        .limit(limit)
+        .build();
+
+    #[derive(Deserialize)]
+    struct RawGroupMessage {
+        #[serde(alias = "_id")]
+        id: i32,
+        group_id: i32,
+        sender_id: i32,
+        content: String,
+        message_type: String,
+        #[serde(default)]
+        image_url: Option<String>,
+        #[serde(default)]
+        original_filename: Option<String>,
+        #[serde(default)]
+        reply_to_id: Option<i32>,
+        #[serde(deserialize_with = "bson::serde_helpers::chrono_datetime_as_bson_datetime::deserialize")]
+        created_at: DateTime<Utc>,
+    }
+
+    let cursor = db
+        .collection::<RawGroupMessage>("group_messages")
+        .find(filter, options)
+        .await?;
+    let raw_messages: Vec<RawGroupMessage> = cursor.try_collect().await?;
+
+    // Batch lookup des noms d'expéditeurs
+    let sender_ids: Vec<i32> = raw_messages
+        .iter()
+        .map(|m| m.sender_id)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let mut username_map = std::collections::HashMap::new();
+    for &sid in &sender_ids {
+        if let Some(user) = db
+            .collection::<UserBasic>("users")
+            .find_one(doc! { "_id": sid }, None)
+            .await?
+        {
+            username_map.insert(sid, crypto::try_decrypt(&user.username, key));
+        }
+    }
+
+    let mut messages: Vec<GroupMessage> = raw_messages
+        .into_iter()
+        .map(|m| {
+            let sender_username = username_map
+                .get(&m.sender_id)
+                .cloned()
+                .unwrap_or_else(|| "???".to_string());
+            GroupMessage {
+                id: m.id,
+                group_id: m.group_id,
+                sender_id: m.sender_id,
+                sender_username,
+                content: crypto::try_decrypt(&m.content, key),
+                message_type: m.message_type,
+                image_url: m.image_url,
+                original_filename: m.original_filename,
+                reply_to_id: m.reply_to_id,
+                created_at: m.created_at,
+            }
+        })
+        .collect();
 
     // Remettre dans l'ordre chronologique
     messages.reverse();
-
-    // Déchiffrer le contenu et le nom de l'expéditeur
-    for msg in &mut messages {
-        msg.content = crypto::try_decrypt(&msg.content, key);
-        msg.sender_username = crypto::try_decrypt(&msg.sender_username, key);
-    }
 
     Ok(messages)
 }
 
 /// Liste les groupes d'un utilisateur avec aperçu du dernier message.
-/// Déchiffre les noms de groupe, messages et noms d'expéditeurs.
-/// Inclut le compteur de messages non lus depuis le dernier message vu.
 pub async fn list_user_groups(
-    pool: &MySqlPool,
+    db: &Database,
     user_id: i32,
     key: &[u8; 32],
-) -> Result<Vec<GroupPreview>, sqlx::Error> {
-    let mut groups = sqlx::query_as::<_, GroupPreview>(
-        "SELECT g.id, g.name, \
-         (SELECT gm2.content FROM group_messages gm2 WHERE gm2.group_id = g.id ORDER BY gm2.created_at DESC LIMIT 1) AS last_message, \
-         (SELECT gm3.created_at FROM group_messages gm3 WHERE gm3.group_id = g.id ORDER BY gm3.created_at DESC LIMIT 1) AS last_message_at, \
-         (SELECT u2.username FROM group_messages gm4 JOIN users u2 ON u2.id = gm4.sender_id WHERE gm4.group_id = g.id ORDER BY gm4.created_at DESC LIMIT 1) AS last_sender, \
-         (SELECT COUNT(*) FROM group_members gm5 WHERE gm5.group_id = g.id) AS member_count, \
-         (SELECT COUNT(*) FROM group_messages gm6 WHERE gm6.group_id = g.id AND gm6.sender_id != ? \
-          AND gm6.created_at > COALESCE( \
-              (SELECT MAX(gm7.created_at) FROM group_messages gm7 WHERE gm7.group_id = g.id AND gm7.sender_id = ?), \
-              '1970-01-01' \
-          )) AS unread_count \
-         FROM `groups` g \
-         JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = ? \
-         ORDER BY COALESCE( \
-             (SELECT gm8.created_at FROM group_messages gm8 WHERE gm8.group_id = g.id ORDER BY gm8.created_at DESC LIMIT 1), \
-             g.created_at \
-         ) DESC",
-    )
-    .bind(user_id)
-    .bind(user_id)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
-
-    // Déchiffrer le nom du groupe, le dernier message et le nom de l'expéditeur
-    for group in &mut groups {
-        group.name = crypto::try_decrypt(&group.name, key);
-        if let Some(ref msg) = group.last_message {
-            group.last_message = Some(crypto::try_decrypt(msg, key));
-        }
-        if let Some(ref sender) = group.last_sender {
-            group.last_sender = Some(crypto::try_decrypt(sender, key));
-        }
+) -> Result<Vec<GroupPreview>, AppError> {
+    // Étape 1 : récupérer les IDs de groupes de l'utilisateur
+    #[derive(Deserialize)]
+    struct GroupIdOnly {
+        group_id: i32,
     }
+
+    let cursor = db
+        .collection::<GroupIdOnly>("group_members")
+        .find(doc! { "user_id": user_id }, None)
+        .await?;
+    let memberships: Vec<GroupIdOnly> = cursor.try_collect().await?;
+    let group_ids: Vec<i32> = memberships.into_iter().map(|m| m.group_id).collect();
+
+    if group_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut groups = Vec::new();
+
+    for &gid in &group_ids {
+        // Détails du groupe
+        let group = match db
+            .collection::<Group>("groups")
+            .find_one(doc! { "_id": gid }, None)
+            .await?
+        {
+            Some(g) => g,
+            None => continue,
+        };
+
+        // Dernier message du groupe
+        #[derive(Deserialize)]
+        struct LastMsg {
+            content: String,
+            sender_id: i32,
+            #[serde(deserialize_with = "bson::serde_helpers::chrono_datetime_as_bson_datetime::deserialize")]
+            created_at: DateTime<Utc>,
+        }
+
+        let last_options = mongodb::options::FindOptions::builder()
+            .sort(doc! { "_id": -1 })
+            .limit(1)
+            .build();
+
+        let cursor = db
+            .collection::<LastMsg>("group_messages")
+            .find(doc! { "group_id": gid }, last_options)
+            .await?;
+        let last_msgs: Vec<LastMsg> = cursor.try_collect().await?;
+        let last_msg = last_msgs.into_iter().next();
+
+        // Nombre de membres
+        let member_count = db
+            .collection::<bson::Document>("group_members")
+            .count_documents(doc! { "group_id": gid }, None)
+            .await? as i64;
+
+        // Messages non lus (après le dernier message envoyé par l'utilisateur)
+        let my_last_options = mongodb::options::FindOptions::builder()
+            .sort(doc! { "created_at": -1 })
+            .limit(1)
+            .build();
+
+        #[derive(Deserialize)]
+        struct MsgTime {
+            #[serde(deserialize_with = "bson::serde_helpers::chrono_datetime_as_bson_datetime::deserialize")]
+            created_at: DateTime<Utc>,
+        }
+
+        let my_cursor = db
+            .collection::<MsgTime>("group_messages")
+            .find(
+                doc! { "group_id": gid, "sender_id": user_id },
+                my_last_options,
+            )
+            .await?;
+        let my_msgs: Vec<MsgTime> = my_cursor.try_collect().await?;
+        let my_last_time = my_msgs.into_iter().next().map(|m| m.created_at);
+
+        let unread_filter = if let Some(t) = my_last_time {
+            doc! {
+                "group_id": gid,
+                "sender_id": { "$ne": user_id },
+                "created_at": { "$gt": bson::DateTime::from_chrono(t) }
+            }
+        } else {
+            doc! {
+                "group_id": gid,
+                "sender_id": { "$ne": user_id }
+            }
+        };
+
+        let unread_count = db
+            .collection::<bson::Document>("group_messages")
+            .count_documents(unread_filter, None)
+            .await? as i64;
+
+        // Nom du dernier expéditeur
+        let last_sender = if let Some(ref msg) = last_msg {
+            db.collection::<UserBasic>("users")
+                .find_one(doc! { "_id": msg.sender_id }, None)
+                .await?
+                .map(|u| crypto::try_decrypt(&u.username, key))
+        } else {
+            None
+        };
+
+        let (last_message, last_message_at) = match last_msg {
+            Some(msg) => (
+                Some(crypto::try_decrypt(&msg.content, key)),
+                Some(msg.created_at),
+            ),
+            None => (None, None),
+        };
+
+        groups.push(GroupPreview {
+            id: gid,
+            name: crypto::try_decrypt(&group.name, key),
+            last_message,
+            last_message_at,
+            last_sender,
+            member_count,
+            unread_count,
+        });
+    }
+
+    // Trier par dernier message (plus récent d'abord)
+    groups.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
 
     Ok(groups)
 }
 
-/// Ajoute des membres à un groupe (ignore les doublons)
+/// Ajoute des membres à un groupe (ignore les doublons via upsert)
 pub async fn add_members(
-    pool: &MySqlPool,
+    db: &Database,
     group_id: i32,
     user_ids: &[i32],
-) -> Result<u64, sqlx::Error> {
+) -> Result<u64, AppError> {
     let mut count = 0u64;
     for &uid in user_ids {
-        let result = sqlx::query(
-            "INSERT IGNORE INTO group_members (group_id, user_id, role) VALUES (?, ?, 'member')",
-        )
-        .bind(group_id)
-        .bind(uid)
-        .execute(pool)
-        .await?;
-        count += result.rows_affected();
+        let options = mongodb::options::UpdateOptions::builder()
+            .upsert(true)
+            .build();
+        let result = db
+            .collection::<bson::Document>("group_members")
+            .update_one(
+                doc! { "group_id": group_id, "user_id": uid },
+                doc! { "$setOnInsert": {
+                    "group_id": group_id,
+                    "user_id": uid,
+                    "role": "member"
+                }},
+                options,
+            )
+            .await?;
+        if result.upserted_id.is_some() {
+            count += 1;
+        }
     }
     Ok(count)
 }
 
 /// Retire un membre d'un groupe
-pub async fn remove_member(
-    pool: &MySqlPool,
-    group_id: i32,
-    user_id: i32,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM group_members WHERE group_id = ? AND user_id = ?")
-        .bind(group_id)
-        .bind(user_id)
-        .execute(pool)
+pub async fn remove_member(db: &Database, group_id: i32, user_id: i32) -> Result<(), AppError> {
+    db.collection::<bson::Document>("group_members")
+        .delete_one(doc! { "group_id": group_id, "user_id": user_id }, None)
         .await?;
     Ok(())
 }

@@ -1,10 +1,10 @@
 //! Configuration globale de l'application.
 //!
 //! Contient l'état partagé (AppState) injecté dans chaque handler Axum
-//! via `State<AppState>`, incluant le pool DB, la clé JWT,
+//! via `State<AppState>`, incluant la base MongoDB, la clé JWT,
 //! et le registre des connexions WebSocket actives.
 
-use sqlx::MySqlPool;
+use mongodb::Database;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -17,8 +17,8 @@ pub type WsConnections = Arc<RwLock<HashMap<i32, Vec<mpsc::UnboundedSender<Strin
 /// Cloné automatiquement par Axum pour chaque requête.
 #[derive(Clone)]
 pub struct AppState {
-    /// Pool de connexions MySQL (async, géré par sqlx)
-    pub db: MySqlPool,
+    /// Base de données MongoDB
+    pub db: Database,
     /// Clé secrète utilisée pour signer et vérifier les tokens JWT
     pub jwt_secret: String,
     /// Registre des connexions WebSocket (temps réel)

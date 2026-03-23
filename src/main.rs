@@ -1,10 +1,11 @@
-//! # Bonjour — API de messagerie directe
+//! # Bonjour — API de messagerie chiffrée
 //!
-//! Serveur REST construit avec Axum, JWT et MySQL.
+//! Serveur REST construit avec Axum, JWT et MongoDB.
 //! Swagger UI disponible sur `/swagger-ui`.
 
 mod config;
 mod crypto;
+mod db;
 mod errors;
 mod handlers;
 mod middleware;
@@ -14,7 +15,8 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
-use sqlx::mysql::MySqlPoolOptions;
+use mongodb::{options::ClientOptions, Client, IndexModel};
+use bson::doc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -28,13 +30,12 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::config::AppState;
 
 /// Définition OpenAPI regroupant tous les endpoints et schémas.
-/// C'est ici que utoipa génère la spec JSON servie par Swagger UI.
 #[derive(OpenApi)]
 #[openapi(
     info(
         title = "Bonjour Chat API",
         version = "0.1.0",
-        description = "API REST de messagerie directe avec authentification JWT"
+        description = "API REST de messagerie chiffrée avec authentification JWT et MongoDB"
     ),
     paths(
         handlers::auth::register,
@@ -100,6 +101,67 @@ impl utoipa::Modify for SecurityAddon {
     }
 }
 
+/// Crée les index MongoDB nécessaires pour les performances et les contraintes d'unicité
+async fn create_indexes(db: &mongodb::Database) {
+    // Index sur users
+    let _ = db.collection::<bson::Document>("users")
+        .create_index(IndexModel::builder().keys(doc! { "username_hash": 1 }).build(), None)
+        .await;
+    let _ = db.collection::<bson::Document>("users")
+        .create_index(IndexModel::builder().keys(doc! { "email_hash": 1 }).build(), None)
+        .await;
+
+    // Index sur messages (conversations)
+    let _ = db.collection::<bson::Document>("messages")
+        .create_index(IndexModel::builder().keys(doc! { "sender_id": 1, "receiver_id": 1 }).build(), None)
+        .await;
+    let _ = db.collection::<bson::Document>("messages")
+        .create_index(IndexModel::builder().keys(doc! { "receiver_id": 1, "sender_id": 1 }).build(), None)
+        .await;
+
+    // Index sur group_members (unicité par groupe + utilisateur)
+    let unique_opts = mongodb::options::IndexOptions::builder().unique(true).build();
+    let _ = db.collection::<bson::Document>("group_members")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "group_id": 1, "user_id": 1 })
+                .options(unique_opts)
+                .build(),
+            None,
+        )
+        .await;
+
+    // Index sur group_messages
+    let _ = db.collection::<bson::Document>("group_messages")
+        .create_index(IndexModel::builder().keys(doc! { "group_id": 1, "_id": -1 }).build(), None)
+        .await;
+
+    // Index sur push_subscriptions
+    let _ = db.collection::<bson::Document>("push_subscriptions")
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build(), None)
+        .await;
+
+    // Index sur refresh_tokens
+    let token_unique = mongodb::options::IndexOptions::builder().unique(true).build();
+    let _ = db.collection::<bson::Document>("refresh_tokens")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "token_hash": 1 })
+                .options(token_unique)
+                .build(),
+            None,
+        )
+        .await;
+    let _ = db.collection::<bson::Document>("refresh_tokens")
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build(), None)
+        .await;
+    let _ = db.collection::<bson::Document>("refresh_tokens")
+        .create_index(IndexModel::builder().keys(doc! { "expires_at": 1 }).build(), None)
+        .await;
+
+    tracing::info!("MongoDB indexes created");
+}
+
 #[tokio::main]
 async fn main() {
     // Initialisation du logger (filtré via la variable RUST_LOG)
@@ -108,19 +170,20 @@ async fn main() {
         .init();
 
     // Lecture des variables d'environnement obligatoires
-    let database_url =
-        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let jwt_secret =
-        std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+    let database_url = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be set (e.g. mongodb://user:pass@host:27017/dbname?authSource=admin)");
+    let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
 
     // Clés VAPID pour les notifications push
-    let vapid_public_key =
-        std::env::var("VAPID_PUBLIC_KEY").unwrap_or_default();
+    let vapid_public_key = std::env::var("VAPID_PUBLIC_KEY").unwrap_or_default();
     let vapid_private_key_file =
         std::env::var("VAPID_PRIVATE_KEY_FILE").unwrap_or_else(|_| "vapid_private.pem".to_string());
     let vapid_private_pem = std::fs::read_to_string(&vapid_private_key_file)
         .unwrap_or_else(|e| {
-            tracing::warn!("Could not read VAPID private key from {}: {}. Push notifications disabled.", vapid_private_key_file, e);
+            tracing::warn!(
+                "Could not read VAPID private key from {}: {}. Push notifications disabled.",
+                vapid_private_key_file, e
+            );
             String::new()
         });
 
@@ -132,19 +195,34 @@ async fn main() {
     let mut encryption_key = [0u8; 32];
     encryption_key.copy_from_slice(&encryption_key_bytes);
 
-    // Création du pool de connexions MySQL (max 10 connexions simultanées)
-    let pool = MySqlPoolOptions::new()
-        .max_connections(10)
-        .connect(&database_url)
+    // Connexion à MongoDB
+    let client_options = ClientOptions::parse(&database_url)
         .await
-        .expect("Failed to connect to MySQL");
+        .expect("Failed to parse MongoDB connection string");
+    let client = Client::with_options(client_options)
+        .expect("Failed to create MongoDB client");
 
-    tracing::info!("Connected to MySQL");
+    // Extraire le nom de la base de données depuis l'URL
+    let db_name = database_url
+        .split('/')
+        .last()
+        .and_then(|s| s.split('?').next())
+        .unwrap_or("bonjour");
+    let db = client.database(db_name);
 
-    // État partagé entre tous les handlers (pool DB + clé JWT + WebSocket + VAPID)
+    // Tester la connexion
+    db.run_command(doc! { "ping": 1 }, None)
+        .await
+        .expect("Failed to connect to MongoDB");
+    tracing::info!("Connected to MongoDB (database: {})", db_name);
+
+    // Créer les index nécessaires
+    create_indexes(&db).await;
+
+    // État partagé entre tous les handlers
     let ws_connections = Arc::new(RwLock::new(HashMap::new()));
     let state = AppState {
-        db: pool,
+        db,
         jwt_secret,
         ws_connections,
         vapid_public_key,
@@ -160,7 +238,7 @@ async fn main() {
         .route("/auth/login", post(handlers::auth::login))
         .route("/auth/refresh", post(handlers::auth::refresh))
         .route("/auth/reset-password", post(handlers::auth::reset_password))
-        // --- Endpoints protégés (JWT requis dans le header Authorization) ---
+        // --- Endpoints protégés (JWT requis) ---
         .route("/auth/me", get(handlers::auth::get_me))
         .route("/auth/profile", put(handlers::auth::update_profile))
         .route("/auth/logout", post(handlers::auth::logout))
@@ -182,13 +260,13 @@ async fn main() {
         .route("/groups/:id/members/:user_id", delete(handlers::groups::remove_member))
         // --- WebSocket temps réel ---
         .route("/ws", get(handlers::ws::ws_handler))
-        // --- Fichiers statiques (images uploadées) ---
+        // --- Fichiers statiques (uploads) ---
         .nest_service("/uploads", ServeDir::new("uploads"))
-        // --- Swagger UI : interface interactive de documentation ---
+        // --- Swagger UI ---
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         // --- Middlewares globaux ---
-        .layer(CorsLayer::permissive())  // Autorise toutes les origines (dev)
-        .layer(TraceLayer::new_for_http()) // Log chaque requête HTTP
+        .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http())
         .with_state(state);
 
     // Écoute sur toutes les interfaces, port 3000
@@ -201,7 +279,7 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-/// Endpoint de vérification de santé — renvoie "OK" si le serveur tourne
+/// Endpoint de vérification de santé
 async fn health() -> &'static str {
     "OK"
 }

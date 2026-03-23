@@ -1,45 +1,53 @@
-//! Modèle utilisateur et opérations de base de données associées.
+//! Modèle utilisateur et opérations MongoDB.
 //!
 //! Contient les structs pour la sérialisation/désérialisation
-//! et les fonctions d'accès à la table `users` dans MySQL.
+//! et les fonctions d'accès à la collection `users` dans MongoDB.
 //! Les noms d'utilisateur et emails sont chiffrés avec AES-256-GCM.
 //! Les lookups utilisent des hash SHA-256 (username_hash, email_hash).
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::MySqlPool;
+use mongodb::Database;
+use bson::doc;
 use utoipa::ToSchema;
+use futures_util::TryStreamExt;
 
 use crate::crypto;
+use crate::errors::AppError;
 
 /// Représentation complète d'un utilisateur en base de données.
-/// Le champ `password_hash` est exclu de la sérialisation JSON
-/// pour ne jamais le renvoyer au client.
-#[derive(Debug, Serialize, sqlx::FromRow)]
+/// Le champ `password_hash` est exclu de la sérialisation JSON.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct User {
+    #[serde(alias = "_id")]
     pub id: i32,
     pub username: String,
     pub email: String,
     #[serde(skip_serializing)]
     pub password_hash: String,
+    #[serde(default)]
+    pub username_hash: Option<String>,
+    #[serde(default)]
+    pub email_hash: Option<String>,
+    #[serde(default)]
+    pub recovery_code_hash: Option<String>,
     /// URL de la photo de profil (stockée dans /uploads/)
+    #[serde(default)]
     pub profile_picture_url: Option<String>,
-    /// Date de dernière connexion (null si jamais connecté via WebSocket)
-    pub last_seen: Option<NaiveDateTime>,
-    pub created_at: NaiveDateTime,
+    /// Date de dernière connexion
+    #[serde(default, deserialize_with = "bson::serde_helpers::chrono_datetime_as_bson_datetime_optional::deserialize")]
+    pub last_seen: Option<DateTime<Utc>>,
+    #[serde(deserialize_with = "bson::serde_helpers::chrono_datetime_as_bson_datetime::deserialize")]
+    pub created_at: DateTime<Utc>,
 }
 
 /// Corps de requête pour l'inscription d'un nouvel utilisateur.
-/// Les contraintes de validation sont appliquées dans le handler.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateUser {
-    /// Nom d'utilisateur unique (entre 3 et 50 caractères)
     #[schema(example = "alice", min_length = 3, max_length = 50)]
     pub username: String,
-    /// Adresse email valide (doit contenir @)
     #[schema(example = "alice@example.com")]
     pub email: String,
-    /// Mot de passe en clair (minimum 6 caractères, hashé en bcrypt côté serveur)
     #[schema(example = "secret123", min_length = 6)]
     pub password: String,
 }
@@ -47,41 +55,36 @@ pub struct CreateUser {
 /// Corps de requête pour la connexion
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct LoginUser {
-    /// Nom d'utilisateur
     #[schema(example = "alice")]
     pub username: String,
-    /// Mot de passe en clair
     #[schema(example = "secret123")]
     pub password: String,
 }
 
 /// Corps de requête pour la réinitialisation du mot de passe.
-/// L'utilisateur doit fournir son username et son code de récupération
-/// (reçu lors de l'inscription) pour prouver qu'il est le propriétaire.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ResetPasswordRequest {
-    /// Nom d'utilisateur du compte
     #[schema(example = "alice")]
     pub username: String,
-    /// Code de récupération (8 caractères, reçu à l'inscription)
     #[schema(example = "A1B2C3D4")]
     pub recovery_code: String,
-    /// Nouveau mot de passe (minimum 6 caractères)
     #[schema(example = "newpassword123", min_length = 6)]
     pub new_password: String,
 }
 
 /// Informations utilisateur renvoyées dans les réponses API
-/// (sans le hash du mot de passe)
-#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UserResponse {
+    #[serde(alias = "_id")]
     pub id: i32,
     pub username: String,
     pub email: String,
-    /// URL de la photo de profil
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub profile_picture_url: Option<String>,
-    pub last_seen: Option<NaiveDateTime>,
-    pub created_at: NaiveDateTime,
+    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "bson::serde_helpers::chrono_datetime_as_bson_datetime_optional::deserialize")]
+    pub last_seen: Option<DateTime<Utc>>,
+    #[serde(deserialize_with = "bson::serde_helpers::chrono_datetime_as_bson_datetime::deserialize")]
+    pub created_at: DateTime<Utc>,
 }
 
 /// Conversion d'un User (modèle DB) vers UserResponse (réponse API)
@@ -98,11 +101,17 @@ impl From<User> for UserResponse {
     }
 }
 
+/// Corps de requête pour la mise à jour du profil
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateProfileRequest {
+    #[schema(example = "/uploads/abc123.jpg")]
+    pub profile_picture_url: Option<String>,
+}
+
 /// Déchiffre les champs sensibles d'un User
 fn decrypt_user(mut user: User, key: &[u8; 32]) -> User {
     user.username = crypto::try_decrypt(&user.username, key);
     user.email = crypto::try_decrypt(&user.email, key);
-    // profile_picture_url est stocké en clair (chemin de fichier)
     user
 }
 
@@ -113,142 +122,136 @@ fn decrypt_user_response(mut user: UserResponse, key: &[u8; 32]) -> UserResponse
     user
 }
 
-/// Insère un nouvel utilisateur en base et retourne (ID, recovery_code).
-/// Le username et l'email sont chiffrés ; les hash sont stockés pour les lookups.
-/// Un code de récupération aléatoire de 8 caractères est généré et son hash SHA-256 stocké.
+/// Insère un nouvel utilisateur et retourne (ID, recovery_code).
 pub async fn create_user(
-    pool: &MySqlPool,
+    db: &Database,
     username: &str,
     email: &str,
     password_hash: &str,
     key: &[u8; 32],
-) -> Result<(u64, String), sqlx::Error> {
+) -> Result<(i32, String), AppError> {
     let encrypted_username = crypto::encrypt(username, key).unwrap_or_else(|_| username.to_string());
     let encrypted_email = crypto::encrypt(email, key).unwrap_or_else(|_| email.to_string());
     let username_hash = crypto::hash_value(username);
     let email_hash = crypto::hash_value(email);
 
-    // Générer un code de récupération de 8 caractères alphanumériques majuscules
     let recovery_code = generate_recovery_code();
     let recovery_code_hash = crypto::hash_value(&recovery_code);
 
-    let result = sqlx::query(
-        "INSERT INTO users (username, email, password_hash, username_hash, email_hash, recovery_code_hash) VALUES (?, ?, ?, ?, ?, ?)"
-    )
-    .bind(&encrypted_username)
-    .bind(&encrypted_email)
-    .bind(password_hash)
-    .bind(&username_hash)
-    .bind(&email_hash)
-    .bind(&recovery_code_hash)
-    .execute(pool)
-    .await?;
+    let new_id = crate::db::next_id(db, "users").await?;
 
-    Ok((result.last_insert_id(), recovery_code))
+    db.collection::<bson::Document>("users")
+        .insert_one(
+            doc! {
+                "_id": new_id,
+                "username": &encrypted_username,
+                "email": &encrypted_email,
+                "password_hash": password_hash,
+                "username_hash": &username_hash,
+                "email_hash": &email_hash,
+                "recovery_code_hash": &recovery_code_hash,
+                "created_at": bson::DateTime::from_chrono(Utc::now()),
+            },
+            None,
+        )
+        .await?;
+
+    Ok((new_id, recovery_code))
 }
 
 /// Génère un code de récupération aléatoire de 8 caractères (A-Z, 0-9)
 fn generate_recovery_code() -> String {
     use rand::Rng;
-    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // sans I/O/1/0 pour éviter les confusions
+    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut rng = rand::thread_rng();
-    (0..8).map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char).collect()
+    (0..8)
+        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
+        .collect()
 }
 
-/// Vérifie le code de récupération d'un utilisateur en comparant les hash SHA-256
+/// Vérifie le code de récupération d'un utilisateur
 pub async fn verify_recovery_code(
-    pool: &MySqlPool,
+    db: &Database,
     user_id: i32,
     recovery_code: &str,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, AppError> {
     let code_hash = crypto::hash_value(&recovery_code.to_uppercase());
-    let row = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM users WHERE id = ? AND recovery_code_hash = ?"
-    )
-    .bind(user_id)
-    .bind(&code_hash)
-    .fetch_one(pool)
-    .await?;
-    Ok(row > 0)
+    let count = db
+        .collection::<bson::Document>("users")
+        .count_documents(doc! { "_id": user_id, "recovery_code_hash": &code_hash }, None)
+        .await?;
+    Ok(count > 0)
 }
 
-/// Recherche un utilisateur par son nom d'utilisateur.
-/// Utilise le hash SHA-256 pour le lookup, avec fallback en clair pour la rétrocompatibilité.
+/// Recherche un utilisateur par son nom d'utilisateur (via hash SHA-256).
 pub async fn find_by_username(
-    pool: &MySqlPool,
+    db: &Database,
     username: &str,
     key: &[u8; 32],
-) -> Result<Option<User>, sqlx::Error> {
+) -> Result<Option<User>, AppError> {
     let username_hash = crypto::hash_value(username);
 
-    // D'abord chercher par hash (données chiffrées)
-    let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, email, password_hash, profile_picture_url, last_seen, created_at FROM users WHERE username_hash = ?"
-    )
-    .bind(&username_hash)
-    .fetch_optional(pool)
-    .await?;
+    // Chercher par hash (données chiffrées)
+    let user = db
+        .collection::<User>("users")
+        .find_one(doc! { "username_hash": &username_hash }, None)
+        .await?;
 
     if let Some(user) = user {
         return Ok(Some(decrypt_user(user, key)));
     }
 
-    // Fallback : chercher par username en clair (anciennes données non chiffrées)
-    let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, email, password_hash, profile_picture_url, last_seen, created_at FROM users WHERE username = ? AND username_hash IS NULL"
-    )
-    .bind(username)
-    .fetch_optional(pool)
-    .await?;
+    // Fallback : chercher par username en clair (anciennes données)
+    let user = db
+        .collection::<User>("users")
+        .find_one(
+            doc! { "username": username, "username_hash": bson::Bson::Null },
+            None,
+        )
+        .await?;
 
     Ok(user.map(|u| decrypt_user(u, key)))
 }
 
 /// Recherche un utilisateur par son ID.
-/// Utilisé pour vérifier l'existence d'un destinataire avant d'envoyer un message.
 pub async fn find_by_id(
-    pool: &MySqlPool,
+    db: &Database,
     id: i32,
     key: &[u8; 32],
-) -> Result<Option<User>, sqlx::Error> {
-    let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, email, password_hash, profile_picture_url, last_seen, created_at FROM users WHERE id = ?"
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+) -> Result<Option<User>, AppError> {
+    let user = db
+        .collection::<User>("users")
+        .find_one(doc! { "_id": id }, None)
+        .await?;
 
     Ok(user.map(|u| decrypt_user(u, key)))
 }
 
 /// Met à jour la date de dernière connexion d'un utilisateur.
-/// Appelé automatiquement lors de la déconnexion WebSocket.
-pub async fn update_last_seen(
-    pool: &MySqlPool,
-    user_id: i32,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE users SET last_seen = NOW() WHERE id = ?")
-        .bind(user_id)
-        .execute(pool)
+pub async fn update_last_seen(db: &Database, user_id: i32) -> Result<(), AppError> {
+    db.collection::<bson::Document>("users")
+        .update_one(
+            doc! { "_id": user_id },
+            doc! { "$set": { "last_seen": bson::DateTime::from_chrono(Utc::now()) } },
+            None,
+        )
         .await?;
     Ok(())
 }
 
 /// Recherche des utilisateurs par nom (fetch all, déchiffre, filtre en Rust).
-/// On ne peut pas utiliser LIKE sur des données chiffrées, donc on récupère
-/// tous les utilisateurs, on déchiffre les noms, et on filtre localement.
 pub async fn search_users(
-    pool: &MySqlPool,
+    db: &Database,
     query: &str,
     exclude_user_id: i32,
     key: &[u8; 32],
-) -> Result<Vec<UserResponse>, sqlx::Error> {
-    let all_users = sqlx::query_as::<_, UserResponse>(
-        "SELECT id, username, email, profile_picture_url, last_seen, created_at FROM users WHERE id != ?"
-    )
-    .bind(exclude_user_id)
-    .fetch_all(pool)
-    .await?;
+) -> Result<Vec<UserResponse>, AppError> {
+    let cursor = db
+        .collection::<UserResponse>("users")
+        .find(doc! { "_id": { "$ne": exclude_user_id } }, None)
+        .await?;
+
+    let all_users: Vec<UserResponse> = cursor.try_collect().await?;
 
     let query_lower = query.to_lowercase();
     let results: Vec<UserResponse> = all_users
@@ -262,72 +265,77 @@ pub async fn search_users(
 }
 
 /// Vérifie si un username ou email est déjà pris.
-/// Utilise les hash pour la comparaison, avec fallback en clair.
 pub async fn username_or_email_exists(
-    pool: &MySqlPool,
+    db: &Database,
     username: &str,
     email: &str,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, AppError> {
     let username_hash = crypto::hash_value(username);
     let email_hash = crypto::hash_value(email);
 
-    // Vérifier par hash (données chiffrées)
-    let row: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM users WHERE username_hash = ? OR email_hash = ?"
-    )
-    .bind(&username_hash)
-    .bind(&email_hash)
-    .fetch_one(pool)
-    .await?;
+    // Vérifier par hash
+    let count = db
+        .collection::<bson::Document>("users")
+        .count_documents(
+            doc! { "$or": [
+                { "username_hash": &username_hash },
+                { "email_hash": &email_hash }
+            ]},
+            None,
+        )
+        .await?;
 
-    if row.0 > 0 {
+    if count > 0 {
         return Ok(true);
     }
 
-    // Fallback : vérifier par valeurs en clair (anciennes données)
-    let row2: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM users WHERE (username = ? AND username_hash IS NULL) OR (email = ? AND email_hash IS NULL)"
-    )
-    .bind(username)
-    .bind(email)
-    .fetch_one(pool)
-    .await?;
+    // Fallback : vérifier par valeurs en clair
+    let count = db
+        .collection::<bson::Document>("users")
+        .count_documents(
+            doc! { "$or": [
+                { "username": username, "username_hash": bson::Bson::Null },
+                { "email": email, "email_hash": bson::Bson::Null }
+            ]},
+            None,
+        )
+        .await?;
 
-    Ok(row2.0 > 0)
+    Ok(count > 0)
 }
 
-/// Corps de requête pour la mise à jour de la photo de profil
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UpdateProfileRequest {
-    /// URL de la photo de profil (issue de /upload)
-    #[schema(example = "/uploads/abc123.jpg")]
-    pub profile_picture_url: Option<String>,
-}
-
-/// Met à jour le mot de passe (hash bcrypt) d'un utilisateur.
+/// Met à jour le mot de passe d'un utilisateur.
 pub async fn update_password(
-    pool: &MySqlPool,
+    db: &Database,
     user_id: i32,
     password_hash: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
-        .bind(password_hash)
-        .bind(user_id)
-        .execute(pool)
+) -> Result<(), AppError> {
+    db.collection::<bson::Document>("users")
+        .update_one(
+            doc! { "_id": user_id },
+            doc! { "$set": { "password_hash": password_hash } },
+            None,
+        )
         .await?;
     Ok(())
 }
 
 /// Met à jour la photo de profil d'un utilisateur.
 pub async fn update_profile_picture(
-    pool: &MySqlPool,
+    db: &Database,
     user_id: i32,
     url: Option<&str>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE users SET profile_picture_url = ? WHERE id = ?")
-        .bind(url)
-        .bind(user_id)
-        .execute(pool)
+) -> Result<(), AppError> {
+    let value = match url {
+        Some(u) => bson::Bson::String(u.to_string()),
+        None => bson::Bson::Null,
+    };
+    db.collection::<bson::Document>("users")
+        .update_one(
+            doc! { "_id": user_id },
+            doc! { "$set": { "profile_picture_url": value } },
+            None,
+        )
         .await?;
     Ok(())
 }

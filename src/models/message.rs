@@ -1,91 +1,76 @@
-//! Modèle de message et opérations de base de données associées.
+//! Modèle de message et opérations MongoDB.
 //!
 //! Gère les messages directs entre utilisateurs : création, récupération
 //! d'une conversation, et listing de toutes les conversations actives.
 //! Les contenus de messages sont chiffrés avec AES-256-GCM.
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::MySqlPool;
+use mongodb::Database;
+use bson::doc;
 use utoipa::ToSchema;
+use futures_util::TryStreamExt;
 
 use crate::crypto;
+use crate::errors::AppError;
 
 /// Représentation d'un message en base de données
-#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Message {
-    /// Identifiant unique du message
+    #[serde(alias = "_id")]
     pub id: i32,
-    /// ID de l'expéditeur
     pub sender_id: i32,
-    /// ID du destinataire
     pub receiver_id: i32,
-    /// Contenu textuel du message
     pub content: String,
-    /// Type de message : "text", "image" ou "file"
     pub message_type: String,
-    /// URL de l'image/fichier (si message_type != "text")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
-    /// Nom original du fichier uploadé
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_filename: Option<String>,
-    /// ID du message auquel celui-ci répond (null si pas une réponse)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_id: Option<i32>,
-    /// Indique si le message a été lu par le destinataire
+    #[serde(default)]
     pub is_read: bool,
-    /// Date et heure d'envoi
-    pub created_at: NaiveDateTime,
+    #[serde(deserialize_with = "bson::serde_helpers::chrono_datetime_as_bson_datetime::deserialize")]
+    pub created_at: DateTime<Utc>,
 }
 
 /// Corps de requête pour envoyer un nouveau message
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateMessage {
-    /// ID de l'utilisateur destinataire
     #[schema(example = 2)]
     pub receiver_id: i32,
-    /// Contenu du message (texte ou légende de l'image)
     #[schema(example = "Bonjour!")]
     pub content: String,
-    /// Type de message : "text" (défaut), "image" ou "file"
     #[serde(default = "default_text")]
     #[schema(example = "text")]
     pub message_type: String,
-    /// URL de l'image/fichier (requis si message_type != "text")
     pub image_url: Option<String>,
-    /// Nom original du fichier uploadé
     pub original_filename: Option<String>,
-    /// ID du message auquel on répond
     pub reply_to_id: Option<i32>,
 }
 
-/// Valeur par défaut pour le type de message
 fn default_text() -> String {
     "text".to_string()
 }
 
-/// Aperçu d'une conversation : affiche le dernier message échangé
-/// avec un utilisateur donné (utilisé dans la liste des conversations)
-#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+/// Aperçu d'une conversation pour la liste
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ConversationPreview {
-    /// ID de l'interlocuteur
     pub user_id: i32,
-    /// Nom d'utilisateur de l'interlocuteur
     pub username: String,
-    /// Contenu du dernier message
     pub last_message: String,
-    /// Date du dernier message
-    pub last_message_at: NaiveDateTime,
-    /// Dernière connexion de l'interlocuteur (null = jamais ou en ligne)
-    pub last_seen: Option<NaiveDateTime>,
-    /// Nombre de messages non lus de cet interlocuteur
+    pub last_message_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<DateTime<Utc>>,
     pub unread_count: i64,
-    /// URL de la photo de profil de l'interlocuteur
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_picture_url: Option<String>,
 }
 
-/// Insère un nouveau message en base de données.
-/// Le contenu du message est chiffré avant l'insertion.
+/// Insère un nouveau message (contenu chiffré). Retourne l'ID.
 pub async fn create_message(
-    pool: &MySqlPool,
+    db: &Database,
     sender_id: i32,
     receiver_id: i32,
     content: &str,
@@ -94,64 +79,70 @@ pub async fn create_message(
     original_filename: Option<&str>,
     reply_to_id: Option<i32>,
     key: &[u8; 32],
-) -> Result<u64, sqlx::Error> {
+) -> Result<i32, AppError> {
     let encrypted_content = crypto::encrypt(content, key).unwrap_or_else(|_| content.to_string());
+    let new_id = crate::db::next_id(db, "messages").await?;
 
-    let result = sqlx::query(
-        "INSERT INTO messages (sender_id, receiver_id, content, message_type, image_url, original_filename, reply_to_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)"
-    )
-    .bind(sender_id)
-    .bind(receiver_id)
-    .bind(&encrypted_content)
-    .bind(message_type)
-    .bind(image_url)
-    .bind(original_filename)
-    .bind(reply_to_id)
-    .execute(pool)
-    .await?;
+    let mut document = doc! {
+        "_id": new_id,
+        "sender_id": sender_id,
+        "receiver_id": receiver_id,
+        "content": &encrypted_content,
+        "message_type": message_type,
+        "is_read": false,
+        "created_at": bson::DateTime::from_chrono(Utc::now()),
+    };
 
-    Ok(result.last_insert_id())
+    if let Some(url) = image_url {
+        document.insert("image_url", url);
+    }
+    if let Some(name) = original_filename {
+        document.insert("original_filename", name);
+    }
+    if let Some(reply_id) = reply_to_id {
+        document.insert("reply_to_id", reply_id);
+    }
+
+    db.collection::<bson::Document>("messages")
+        .insert_one(document, None)
+        .await?;
+
+    Ok(new_id)
 }
 
 /// Récupère les messages échangés entre deux utilisateurs avec pagination.
-/// Si `before_id` est fourni, retourne les messages antérieurs à cet ID.
-/// `limit` contrôle le nombre de messages retournés (défaut 10).
 pub async fn get_conversation(
-    pool: &MySqlPool,
+    db: &Database,
     user_id: i32,
     other_user_id: i32,
     before_id: Option<i32>,
     limit: i64,
     key: &[u8; 32],
-) -> Result<Vec<Message>, sqlx::Error> {
-    let mut messages = if let Some(bid) = before_id {
-        // Charger les messages avant un ID donné (scroll vers le haut)
-        sqlx::query_as::<_, Message>(
-            "SELECT id, sender_id, receiver_id, content, message_type, image_url, original_filename, reply_to_id, is_read, created_at FROM messages \
-             WHERE ((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)) AND id < ? \
-             ORDER BY id DESC LIMIT ?"
-        )
-        .bind(user_id).bind(other_user_id)
-        .bind(other_user_id).bind(user_id)
-        .bind(bid).bind(limit)
-        .fetch_all(pool)
-        .await?
-    } else {
-        // Charger les N derniers messages
-        sqlx::query_as::<_, Message>(
-            "SELECT id, sender_id, receiver_id, content, message_type, image_url, original_filename, reply_to_id, is_read, created_at FROM messages \
-             WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?) \
-             ORDER BY id DESC LIMIT ?"
-        )
-        .bind(user_id).bind(other_user_id)
-        .bind(other_user_id).bind(user_id)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?
+) -> Result<Vec<Message>, AppError> {
+    let mut filter = doc! {
+        "$or": [
+            { "sender_id": user_id, "receiver_id": other_user_id },
+            { "sender_id": other_user_id, "receiver_id": user_id }
+        ]
     };
 
-    // Remettre dans l'ordre chronologique (ASC) après le LIMIT DESC
+    if let Some(bid) = before_id {
+        filter.insert("_id", doc! { "$lt": bid });
+    }
+
+    let options = mongodb::options::FindOptions::builder()
+        .sort(doc! { "_id": -1 })
+        .limit(limit)
+        .build();
+
+    let cursor = db
+        .collection::<Message>("messages")
+        .find(filter, options)
+        .await?;
+
+    let mut messages: Vec<Message> = cursor.try_collect().await?;
+
+    // Remettre dans l'ordre chronologique
     messages.reverse();
 
     // Déchiffrer le contenu de chaque message
@@ -163,55 +154,119 @@ pub async fn get_conversation(
 }
 
 /// Liste toutes les conversations actives de l'utilisateur.
-/// Déchiffre le nom d'utilisateur et le dernier message.
 pub async fn list_conversations(
-    pool: &MySqlPool,
+    db: &Database,
     user_id: i32,
     key: &[u8; 32],
-) -> Result<Vec<ConversationPreview>, sqlx::Error> {
-    let mut conversations = sqlx::query_as::<_, ConversationPreview>(
-        "SELECT u.id AS user_id, u.username, m.content AS last_message, m.created_at AS last_message_at, u.last_seen, \
-         (SELECT COUNT(*) FROM messages m3 WHERE m3.sender_id = u.id AND m3.receiver_id = ? AND m3.is_read = FALSE) AS unread_count, \
-         u.profile_picture_url \
-         FROM messages m \
-         JOIN users u ON u.id = CASE WHEN m.sender_id = ? THEN m.receiver_id ELSE m.sender_id END \
-         WHERE m.id IN ( \
-             SELECT MAX(m2.id) FROM messages m2 \
-             WHERE m2.sender_id = ? OR m2.receiver_id = ? \
-             GROUP BY LEAST(m2.sender_id, m2.receiver_id), GREATEST(m2.sender_id, m2.receiver_id) \
-         ) \
-         ORDER BY m.created_at DESC"
-    )
-    .bind(user_id)
-    .bind(user_id)
-    .bind(user_id)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
+) -> Result<Vec<ConversationPreview>, AppError> {
+    // Pipeline d'agrégation pour obtenir le dernier message par conversation
+    let pipeline = vec![
+        doc! { "$match": {
+            "$or": [
+                { "sender_id": user_id },
+                { "receiver_id": user_id }
+            ]
+        }},
+        doc! { "$addFields": {
+            "partner_id": {
+                "$cond": {
+                    "if": { "$eq": ["$sender_id", user_id] },
+                    "then": "$receiver_id",
+                    "else": "$sender_id"
+                }
+            }
+        }},
+        doc! { "$sort": { "_id": -1 } },
+        doc! { "$group": {
+            "_id": "$partner_id",
+            "last_message": { "$first": "$content" },
+            "last_message_at": { "$first": "$created_at" },
+        }},
+        doc! { "$sort": { "last_message_at": -1 } },
+    ];
 
-    // Déchiffrer le nom d'utilisateur et le dernier message
-    for conv in &mut conversations {
-        conv.username = crypto::try_decrypt(&conv.username, key);
-        conv.last_message = crypto::try_decrypt(&conv.last_message, key);
+    let mut cursor = db
+        .collection::<bson::Document>("messages")
+        .aggregate(pipeline, None)
+        .await?;
+
+    let mut conversations = Vec::new();
+
+    while let Some(doc_result) = cursor.try_next().await? {
+        let partner_id = doc_result.get_i32("_id").unwrap_or(0);
+        let last_message = doc_result.get_str("last_message").unwrap_or("").to_string();
+        let last_message_at = doc_result
+            .get_datetime("last_message_at")
+            .map(|dt| dt.to_chrono())
+            .unwrap_or_else(|_| Utc::now());
+
+        // Récupérer les infos du partenaire
+        let user_opt = db
+            .collection::<super::user::User>("users")
+            .find_one(doc! { "_id": partner_id }, None)
+            .await?;
+
+        let (username, last_seen, profile_picture_url) = match user_opt {
+            Some(u) => {
+                let decrypted = super::user::User {
+                    username: crypto::try_decrypt(&u.username, key),
+                    email: crypto::try_decrypt(&u.email, key),
+                    ..u
+                };
+                (
+                    decrypted.username,
+                    decrypted.last_seen,
+                    decrypted.profile_picture_url,
+                )
+            }
+            None => ("Unknown".to_string(), None, None),
+        };
+
+        // Compter les messages non lus de ce partenaire
+        let unread_count = db
+            .collection::<bson::Document>("messages")
+            .count_documents(
+                doc! {
+                    "sender_id": partner_id,
+                    "receiver_id": user_id,
+                    "is_read": false,
+                },
+                None,
+            )
+            .await? as i64;
+
+        conversations.push(ConversationPreview {
+            user_id: partner_id,
+            username,
+            last_message: crypto::try_decrypt(&last_message, key),
+            last_message_at,
+            last_seen,
+            unread_count,
+            profile_picture_url,
+        });
     }
 
     Ok(conversations)
 }
 
 /// Marque tous les messages d'un expéditeur comme lus pour le destinataire.
-/// Retourne le nombre de messages marqués comme lus.
 pub async fn mark_as_read(
-    pool: &MySqlPool,
+    db: &Database,
     receiver_id: i32,
     sender_id: i32,
-) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        "UPDATE messages SET is_read = TRUE WHERE sender_id = ? AND receiver_id = ? AND is_read = FALSE",
-    )
-    .bind(sender_id)
-    .bind(receiver_id)
-    .execute(pool)
-    .await?;
+) -> Result<u64, AppError> {
+    let result = db
+        .collection::<bson::Document>("messages")
+        .update_many(
+            doc! {
+                "sender_id": sender_id,
+                "receiver_id": receiver_id,
+                "is_read": false,
+            },
+            doc! { "$set": { "is_read": true } },
+            None,
+        )
+        .await?;
 
-    Ok(result.rows_affected())
+    Ok(result.modified_count)
 }

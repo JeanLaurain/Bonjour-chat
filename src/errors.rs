@@ -2,8 +2,6 @@
 //!
 //! Toutes les erreurs sont converties en réponses HTTP JSON grâce à
 //! l'implémentation de `IntoResponse` pour `AppError`.
-//! Les types de réponse (AuthResponse, SendMessageResponse, etc.) sont
-//! définis ici pour être réutilisés dans les annotations Swagger (utoipa).
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -19,25 +17,21 @@ use utoipa::ToSchema;
 /// Réponse d'erreur standard renvoyée par tous les endpoints
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ErrorResponse {
-    /// Description de l'erreur
     pub error: String,
 }
 
 /// Réponse renvoyée après inscription ou connexion réussie
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AuthResponse {
-    /// Message de confirmation
     pub message: String,
-    /// Informations de l'utilisateur
     pub user: UserInfo,
-    /// Token JWT à utiliser dans le header Authorization
     pub token: String,
 }
 
 /// Informations basiques d'un utilisateur (sans mot de passe)
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UserInfo {
-    pub id: u64,
+    pub id: i32,
     pub username: String,
     pub email: String,
 }
@@ -45,36 +39,28 @@ pub struct UserInfo {
 /// Réponse renvoyée après l'envoi d'un message
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SendMessageResponse {
-    /// Message de confirmation
     pub message: String,
-    /// ID du message créé
-    pub id: u64,
-    /// ID de l'expéditeur
+    pub id: i32,
     pub sender_id: i32,
-    /// ID du destinataire
     pub receiver_id: i32,
 }
 
 /// Réponse contenant les messages d'une conversation
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ConversationResponse {
-    /// ID de l'interlocuteur
     pub conversation_with: i32,
-    /// Liste des messages échangés, triés chronologiquement
     pub messages: Vec<crate::models::message::Message>,
 }
 
 /// Réponse contenant la liste de toutes les conversations actives
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ConversationsListResponse {
-    /// Aperçu de chaque conversation (dernier message)
     pub conversations: Vec<crate::models::message::ConversationPreview>,
 }
 
 /// Réponse contenant les résultats de recherche d'utilisateurs
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UsersSearchResponse {
-    /// Liste des utilisateurs correspondant à la recherche
     pub users: Vec<crate::models::user::UserResponse>,
 }
 
@@ -83,7 +69,6 @@ pub struct UsersSearchResponse {
 // ──────────────────────────────────────────────
 
 /// Erreurs possibles dans l'application.
-/// Chaque variante est mappée vers un code HTTP et un message JSON.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("Invalid credentials")]
@@ -101,10 +86,13 @@ pub enum AppError {
     #[error("Validation error: {0}")]
     Validation(String),
 
-    /// Erreur de base de données (sqlx) — loguée côté serveur,
-    /// jamais exposée au client
+    /// Erreur de base de données MongoDB
     #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(String),
+
+    /// Erreur d'authentification (token invalide, expiré, etc.)
+    #[error("Auth error: {0}")]
+    Auth(String),
 
     /// Erreur de création/vérification JWT
     #[error("JWT error: {0}")]
@@ -115,9 +103,28 @@ pub enum AppError {
     Bcrypt(#[from] bcrypt::BcryptError),
 }
 
+/// Conversion depuis les erreurs MongoDB
+impl From<mongodb::error::Error> for AppError {
+    fn from(e: mongodb::error::Error) -> Self {
+        AppError::Database(e.to_string())
+    }
+}
+
+/// Conversion depuis les erreurs de désérialisation BSON
+impl From<bson::de::Error> for AppError {
+    fn from(e: bson::de::Error) -> Self {
+        AppError::Database(format!("BSON error: {}", e))
+    }
+}
+
+/// Conversion depuis les erreurs de sérialisation BSON
+impl From<bson::ser::Error> for AppError {
+    fn from(e: bson::ser::Error) -> Self {
+        AppError::Database(format!("BSON error: {}", e))
+    }
+}
+
 /// Conversion automatique de `AppError` en réponse HTTP.
-/// Les erreurs internes (DB, bcrypt) sont masquées au client
-/// et loguées côté serveur pour le debug.
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
@@ -126,10 +133,9 @@ impl IntoResponse for AppError {
             AppError::UserNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
             AppError::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-
-            // Erreurs internes : on log le détail mais on renvoie un message générique
+            AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Database(e) => {
-                tracing::error!("Database error: {:?}", e);
+                tracing::error!("Database error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
             }
             AppError::Jwt(e) => {
@@ -142,7 +148,6 @@ impl IntoResponse for AppError {
             }
         };
 
-        // Toutes les erreurs sont renvoyées au format { "error": "..." }
         (status, Json(json!({ "error": message }))).into_response()
     }
 }
