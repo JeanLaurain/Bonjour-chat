@@ -1,3 +1,10 @@
+-- =============================================================
+-- Bonjour Chat — Schéma complet de la base de données
+-- Ce fichier est exécuté automatiquement par Docker au premier
+-- démarrage (via docker-entrypoint-initdb.d).
+-- =============================================================
+
+-- ── Utilisateurs ──────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS users (
     id INT AUTO_INCREMENT PRIMARY KEY,
     username VARCHAR(500) NOT NULL,
@@ -13,6 +20,7 @@ CREATE TABLE IF NOT EXISTS users (
     UNIQUE KEY uq_email_hash (email_hash)
 );
 
+-- ── Messages directs (DM) ─────────────────────────────────────
 CREATE TABLE IF NOT EXISTS messages (
     id INT AUTO_INCREMENT PRIMARY KEY,
     sender_id INT NOT NULL,
@@ -28,6 +36,12 @@ CREATE TABLE IF NOT EXISTS messages (
     FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE INDEX idx_messages_sender ON messages(sender_id);
+CREATE INDEX idx_messages_receiver ON messages(receiver_id);
+CREATE INDEX idx_messages_conversation ON messages(sender_id, receiver_id, created_at);
+CREATE INDEX idx_messages_unread ON messages(receiver_id, sender_id, is_read);
+
+-- ── Notifications push ────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS push_subscriptions (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT NOT NULL,
@@ -39,13 +53,9 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     UNIQUE KEY uq_user_endpoint (user_id, endpoint)
 );
 
-CREATE INDEX idx_messages_sender ON messages(sender_id);
-CREATE INDEX idx_messages_receiver ON messages(receiver_id);
-CREATE INDEX idx_messages_conversation ON messages(sender_id, receiver_id, created_at);
-CREATE INDEX idx_messages_unread ON messages(receiver_id, sender_id, is_read);
 CREATE INDEX idx_push_subs_user ON push_subscriptions(user_id);
 
--- Tables pour les groupes de conversation
+-- ── Groupes de conversation ───────────────────────────────────
 CREATE TABLE IF NOT EXISTS `groups` (
     id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(500) NOT NULL,
@@ -81,7 +91,7 @@ CREATE TABLE IF NOT EXISTS group_messages (
 CREATE INDEX idx_group_messages_group ON group_messages(group_id, created_at);
 CREATE INDEX idx_group_members_user ON group_members(user_id);
 
--- Table des refresh tokens (sessions longues, 7 jours)
+-- ── Refresh tokens (sessions longues, 7 jours) ───────────────
 CREATE TABLE IF NOT EXISTS refresh_tokens (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT NOT NULL,
