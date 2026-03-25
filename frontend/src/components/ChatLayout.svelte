@@ -159,6 +159,20 @@
       onlineUsers.update(u => ({ ...u, [data.data.user_id]: data.data.online }));
     }
 
+    // ── Réactions en temps réel ──
+    if (data.type === 'reaction_updated') {
+      const { message_id, context, reactions, group_id } = data.data;
+      // Mettre à jour les réactions dans les messages affichés
+      const isCurrent =
+        (context === 'dm' && convType === 'dm') ||
+        (context === 'group' && convType === 'group' && selectedGroupId === group_id);
+      if (isCurrent) {
+        messages = messages.map(m =>
+          m.id === message_id ? { ...m, reactions: reactions || [] } : m
+        );
+      }
+    }
+
     // ── WebRTC Signaling ──
     if (data.type === 'call_offer') {
       console.log('[WS] call_offer reçu de user', data.from_id);
@@ -330,6 +344,27 @@
     replyTo = null;
   }
 
+  /** Toggle une réaction emoji sur un message */
+  async function handleReaction(e) {
+    const { messageId, emoji } = e.detail;
+    try {
+      let result;
+      if (convType === 'dm') {
+        result = await api.toggleReaction(messageId, emoji);
+      } else if (convType === 'group' && selectedGroupId) {
+        result = await api.toggleGroupReaction(selectedGroupId, messageId, emoji);
+      }
+      // Mise à jour locale immédiate (le WS la confirmera aussi)
+      if (result?.reactions) {
+        messages = messages.map(m =>
+          m.id === messageId ? { ...m, reactions: result.reactions } : m
+        );
+      }
+    } catch (err) {
+      console.error('Erreur réaction:', err);
+    }
+  }
+
   /** Démarrer un appel (audio ou vidéo) en DM */
   function handleStartCall(e) {
     if (activeCall || !selectedUserId) return;
@@ -440,6 +475,7 @@
       on:openGroupSettings={() => showGroupSettings = true}
       on:reply={handleReply}
       on:clearReply={handleClearReply}
+      on:react={handleReaction}
       on:startCall={handleStartCall}
       on:groupCall={handleGroupCall}
     />

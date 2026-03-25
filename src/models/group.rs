@@ -12,6 +12,7 @@ use futures_util::TryStreamExt;
 
 use crate::crypto;
 use crate::errors::AppError;
+use super::message::Reaction;
 
 /// Représentation d'un groupe en base de données
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -47,6 +48,8 @@ pub struct GroupMessage {
     pub original_filename: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_id: Option<i32>,
+    #[serde(default)]
+    pub reactions: Vec<Reaction>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -323,6 +326,8 @@ pub async fn get_group_messages(
         original_filename: Option<String>,
         #[serde(default)]
         reply_to_id: Option<i32>,
+        #[serde(default)]
+        reactions: Vec<Reaction>,
         #[serde(deserialize_with = "bson::serde_helpers::chrono_datetime_as_bson_datetime::deserialize")]
         created_at: DateTime<Utc>,
     }
@@ -369,6 +374,7 @@ pub async fn get_group_messages(
                 image_url: m.image_url,
                 original_filename: m.original_filename,
                 reply_to_id: m.reply_to_id,
+                reactions: m.reactions,
                 created_at: m.created_at,
             }
         })
@@ -554,4 +560,76 @@ pub async fn remove_member(db: &Database, group_id: i32, user_id: i32) -> Result
         .delete_one(doc! { "group_id": group_id, "user_id": user_id }, None)
         .await?;
     Ok(())
+}
+
+/// Toggle a reaction on a group message. Returns the updated reactions list.
+pub async fn toggle_group_reaction(
+    db: &Database,
+    message_id: i32,
+    user_id: i32,
+    emoji: &str,
+) -> Result<Vec<Reaction>, AppError> {
+    let coll = db.collection::<bson::Document>("group_messages");
+
+    // Check if user already reacted with this emoji
+    let filter_has = doc! {
+        "_id": message_id,
+        "reactions": { "$elemMatch": { "emoji": emoji, "user_ids": user_id } }
+    };
+
+    let exists = coll.find_one(filter_has, None).await?.is_some();
+
+    if exists {
+        // Remove user from this emoji's user_ids
+        coll.update_one(
+            doc! { "_id": message_id, "reactions.emoji": emoji },
+            doc! { "$pull": { "reactions.$.user_ids": user_id } },
+            None,
+        )
+        .await?;
+        // Clean up empty reaction entries
+        coll.update_one(
+            doc! { "_id": message_id },
+            doc! { "$pull": { "reactions": { "user_ids": { "$size": 0 } } } },
+            None,
+        )
+        .await?;
+    } else {
+        // Check if emoji entry exists
+        let filter_emoji = doc! { "_id": message_id, "reactions.emoji": emoji };
+        let emoji_exists = coll.find_one(filter_emoji, None).await?.is_some();
+
+        if emoji_exists {
+            // Add user to existing emoji entry
+            coll.update_one(
+                doc! { "_id": message_id, "reactions.emoji": emoji },
+                doc! { "$addToSet": { "reactions.$.user_ids": user_id } },
+                None,
+            )
+            .await?;
+        } else {
+            // Create new emoji entry
+            coll.update_one(
+                doc! { "_id": message_id },
+                doc! { "$push": { "reactions": { "emoji": emoji, "user_ids": [user_id] } } },
+                None,
+            )
+            .await?;
+        }
+    }
+
+    // Return updated reactions
+    let msg = coll.find_one(doc! { "_id": message_id }, None).await?;
+    match msg {
+        Some(d) => {
+            let reactions: Vec<Reaction> = d
+                .get_array("reactions")
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|r| bson::from_bson(r.clone()).ok())
+                .collect();
+            Ok(reactions)
+        }
+        None => Ok(vec![]),
+    }
 }

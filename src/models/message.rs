@@ -14,6 +14,13 @@ use futures_util::TryStreamExt;
 use crate::crypto;
 use crate::errors::AppError;
 
+/// Une réaction emoji sur un message
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct Reaction {
+    pub emoji: String,
+    pub user_ids: Vec<i32>,
+}
+
 /// Représentation d'un message en base de données
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Message {
@@ -31,6 +38,8 @@ pub struct Message {
     pub reply_to_id: Option<i32>,
     #[serde(default)]
     pub is_read: bool,
+    #[serde(default)]
+    pub reactions: Vec<Reaction>,
     #[serde(deserialize_with = "bson::serde_helpers::chrono_datetime_as_bson_datetime::deserialize")]
     pub created_at: DateTime<Utc>,
 }
@@ -269,4 +278,95 @@ pub async fn mark_as_read(
         .await?;
 
     Ok(result.modified_count)
+}
+
+/// Toggle a reaction on a DM message. Returns the updated reactions list.
+pub async fn toggle_reaction(
+    db: &Database,
+    message_id: i32,
+    user_id: i32,
+    emoji: &str,
+) -> Result<Vec<Reaction>, AppError> {
+    let coll = db.collection::<bson::Document>("messages");
+
+    // Check if user already reacted with this emoji
+    let filter_has = doc! {
+        "_id": message_id,
+        "reactions": { "$elemMatch": { "emoji": emoji, "user_ids": user_id } }
+    };
+
+    let exists = coll.find_one(filter_has, None).await?.is_some();
+
+    if exists {
+        // Remove user from this emoji's user_ids
+        coll.update_one(
+            doc! { "_id": message_id, "reactions.emoji": emoji },
+            doc! { "$pull": { "reactions.$.user_ids": user_id } },
+            None,
+        )
+        .await?;
+        // Clean up empty reaction entries
+        coll.update_one(
+            doc! { "_id": message_id },
+            doc! { "$pull": { "reactions": { "user_ids": { "$size": 0 } } } },
+            None,
+        )
+        .await?;
+    } else {
+        // Check if emoji entry exists
+        let filter_emoji = doc! { "_id": message_id, "reactions.emoji": emoji };
+        let emoji_exists = coll.find_one(filter_emoji, None).await?.is_some();
+
+        if emoji_exists {
+            // Add user to existing emoji entry
+            coll.update_one(
+                doc! { "_id": message_id, "reactions.emoji": emoji },
+                doc! { "$addToSet": { "reactions.$.user_ids": user_id } },
+                None,
+            )
+            .await?;
+        } else {
+            // Create new emoji entry
+            coll.update_one(
+                doc! { "_id": message_id },
+                doc! { "$push": { "reactions": { "emoji": emoji, "user_ids": [user_id] } } },
+                None,
+            )
+            .await?;
+        }
+    }
+
+    // Return updated reactions
+    let msg = coll.find_one(doc! { "_id": message_id }, None).await?;
+    match msg {
+        Some(d) => {
+            let reactions: Vec<Reaction> = d
+                .get_array("reactions")
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|r| bson::from_bson(r.clone()).ok())
+                .collect();
+            Ok(reactions)
+        }
+        None => Ok(vec![]),
+    }
+}
+
+/// Check if user is participant in a DM message
+pub async fn is_participant(
+    db: &Database,
+    message_id: i32,
+    user_id: i32,
+) -> Result<bool, AppError> {
+    let result = db
+        .collection::<bson::Document>("messages")
+        .find_one(
+            doc! {
+                "_id": message_id,
+                "$or": [{ "sender_id": user_id }, { "receiver_id": user_id }]
+            },
+            None,
+        )
+        .await?;
+    Ok(result.is_some())
 }

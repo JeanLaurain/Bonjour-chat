@@ -23,6 +23,33 @@
   // État du swipe pour répondre
   let swipeState = { active: false, msgId: null, startX: 0, currentX: 0 };
 
+  // Emojis disponibles pour les réactions
+  const reactionEmojis = ['😀', '😍', '😂', '👍', '❤️', '🔥', '👏', '🎉', '😮', '😢'];
+
+  // Emoji picker ouvert sur quel message (null = fermé)
+  let emojiPickerMsgId = null;
+
+  /** Ouvre/ferme le picker emoji sur un message */
+  function toggleEmojiPicker(msgId) {
+    emojiPickerMsgId = emojiPickerMsgId === msgId ? null : msgId;
+  }
+
+  /** Envoie une réaction et ferme le picker */
+  function reactToMessage(msgId, emoji) {
+    dispatch('react', { messageId: msgId, emoji });
+    emojiPickerMsgId = null;
+  }
+
+  /** Vérifie si l'utilisateur courant a réagi avec cet emoji */
+  function hasMyReaction(reaction) {
+    return reaction.user_ids?.includes(me);
+  }
+
+  /** Ferme le picker emoji si on clique ailleurs */
+  function handleWindowClick() {
+    if (emojiPickerMsgId !== null) emojiPickerMsgId = null;
+  }
+
   // Détecter le scroll en haut pour charger les messages plus anciens
   function handleScroll() {
     if (!messagesEl) return;
@@ -151,7 +178,7 @@
   }
 </script>
 
-<div class="flex flex-col flex-1 h-full bg-slate-800">
+<div class="flex flex-col flex-1 h-full bg-slate-800" on:click={handleWindowClick}>
   {#if conv}
     <!-- En-tête de la conversation -->
     <div class="flex items-center gap-3 px-4 md:px-6 py-3 bg-slate-800/90 backdrop-blur border-b border-slate-700/50 flex-shrink-0">
@@ -279,7 +306,7 @@
           {@const offset = getSwipeOffset(item.id)}
           <!-- Message avec support swipe-to-reply -->
           <div
-            class="flex {mine ? 'justify-end' : 'justify-start'} animate-fade-in"
+            class="group flex {mine ? 'justify-end' : 'justify-start'} animate-fade-in"
             style="transform: translateX({offset}px); transition: {swipeState.active && swipeState.msgId === item.id ? 'none' : 'transform 0.2s'}"
             on:touchstart={(e) => handleTouchStart(e, item)}
             on:touchmove={handleTouchMove}
@@ -338,6 +365,51 @@
                 {/if}
                 <p class="text-[10px] {mine ? 'text-primary-200' : 'text-slate-400'} mt-1 text-right">{formatTime(item.created_at)}</p>
               </div>
+
+              <!-- Réactions existantes + bouton ajouter -->
+              <div class="flex flex-wrap items-center gap-1 mt-1 {mine ? 'justify-end' : 'justify-start'} ml-1 mr-1">
+                {#if item.reactions?.length}
+                  {#each item.reactions as reaction}
+                    <button
+                      on:click={() => reactToMessage(item.id, reaction.emoji)}
+                      class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs transition-all
+                        {hasMyReaction(reaction)
+                          ? 'bg-primary-500/30 border border-primary-500/60 text-primary-200'
+                          : 'bg-slate-700/60 border border-slate-600/40 text-slate-300 hover:bg-slate-600/60'}"
+                      title={reaction.user_ids?.length + ' réaction(s)'}
+                    >
+                      <span class="text-sm">{reaction.emoji}</span>
+                      <span class="text-[10px] font-medium">{reaction.user_ids?.length || 0}</span>
+                    </button>
+                  {/each}
+                {/if}
+
+                <!-- Bouton pour ouvrir l'emoji picker -->
+                <button
+                  on:click|stopPropagation={() => toggleEmojiPicker(item.id)}
+                  class="inline-flex items-center justify-center w-6 h-6 rounded-full text-slate-500 hover:text-slate-300 hover:bg-slate-700/50 transition-all text-sm opacity-0 group-hover:opacity-100 focus:opacity-100"
+                  class:opacity-100={emojiPickerMsgId === item.id || item.reactions?.length > 0}
+                  title="Ajouter une réaction"
+                >
+                  😊
+                </button>
+              </div>
+
+              <!-- Emoji picker (popup) -->
+              {#if emojiPickerMsgId === item.id}
+                <div class="relative {mine ? 'flex justify-end' : 'flex justify-start'}">
+                  <div class="absolute bottom-0 z-20 bg-slate-800 border border-slate-600/60 rounded-xl shadow-xl p-2 flex flex-wrap gap-1 max-w-[240px] animate-fade-in">
+                    {#each reactionEmojis as emoji}
+                      <button
+                        on:click|stopPropagation={() => reactToMessage(item.id, emoji)}
+                        class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-700 transition-colors text-lg hover:scale-110 transform"
+                      >
+                        {emoji}
+                      </button>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
 
               <!-- Bouton répondre (clic long / desktop) -->
               <button

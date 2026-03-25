@@ -246,6 +246,7 @@ async fn main() {
         .route("/conversations", get(handlers::messages::list_conversations))
         .route("/conversations/:user_id", get(handlers::messages::get_conversation))
         .route("/conversations/:user_id/read", put(handlers::messages::mark_as_read))
+        .route("/messages/:id/reactions", post(handlers::messages::toggle_reaction))
         .route("/users/search", get(handlers::users::search_users))
         .route("/upload", post(handlers::uploads::upload_image))
         // --- Notifications push ---
@@ -258,6 +259,7 @@ async fn main() {
         .route("/groups/:id/messages", get(handlers::groups::get_group_messages).post(handlers::groups::send_group_message))
         .route("/groups/:id/members", post(handlers::groups::add_members))
         .route("/groups/:id/members/:user_id", delete(handlers::groups::remove_member))
+        .route("/groups/:id/messages/:msg_id/reactions", post(handlers::groups::toggle_group_reaction))
         // --- WebSocket temps réel ---
         .route("/ws", get(handlers::ws::ws_handler))
         // --- Fichiers statiques (uploads) ---

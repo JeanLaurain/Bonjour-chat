@@ -9,6 +9,7 @@ use axum::{
     http::header,
     Json,
 };
+use bson::doc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -288,4 +289,60 @@ pub async fn mark_as_read(
         "message": "Messages marked as read",
         "count": count
     })))
+}
+
+/// POST /messages/:id/reactions — Toggle a reaction on a DM message
+pub async fn toggle_reaction(
+    State(state): State<AppState>,
+    Path(message_id): Path<i32>,
+    req: Request,
+) -> Result<Json<Value>, AppError> {
+    let claims = extract_claims(&req, &state.jwt_secret)?;
+
+    let body = axum::body::to_bytes(req.into_body(), 1024)
+        .await
+        .map_err(|_| AppError::Validation("Invalid request body".into()))?;
+
+    #[derive(Deserialize)]
+    struct ReactionPayload {
+        emoji: String,
+    }
+
+    let payload: ReactionPayload = serde_json::from_slice(&body)
+        .map_err(|_| AppError::Validation("Invalid JSON".into()))?;
+
+    // Verify user is participant
+    if !message::is_participant(&state.db, message_id, claims.sub).await? {
+        return Err(AppError::Unauthorized);
+    }
+
+    let reactions =
+        message::toggle_reaction(&state.db, message_id, claims.sub, &payload.emoji).await?;
+
+    // Broadcast reaction update via WebSocket to both participants
+    let msg_doc = state
+        .db
+        .collection::<bson::Document>("messages")
+        .find_one(doc! { "_id": message_id }, None)
+        .await?;
+
+    if let Some(d) = msg_doc {
+        let sender_id = d.get_i32("sender_id").unwrap_or(0);
+        let receiver_id = d.get_i32("receiver_id").unwrap_or(0);
+
+        let ws_msg = json!({
+            "type": "reaction_updated",
+            "data": {
+                "message_id": message_id,
+                "context": "dm",
+                "reactions": reactions,
+            }
+        })
+        .to_string();
+
+        crate::handlers::ws::send_to_user(&state, sender_id, &ws_msg).await;
+        crate::handlers::ws::send_to_user(&state, receiver_id, &ws_msg).await;
+    }
+
+    Ok(Json(json!({ "reactions": reactions })))
 }

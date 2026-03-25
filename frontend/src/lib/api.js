@@ -223,6 +223,23 @@ export const renameGroup = (id, name) =>
     body: JSON.stringify({ name }),
   });
 
+// ── Reactions ─────────────────────────────────────────
+/** Toggle une réaction emoji sur un message DM */
+export const toggleReaction = (messageId, emoji) =>
+  request(`/messages/${messageId}/reactions`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ emoji }),
+  });
+
+/** Toggle une réaction emoji sur un message de groupe */
+export const toggleGroupReaction = (groupId, messageId, emoji) =>
+  request(`/groups/${groupId}/messages/${messageId}/reactions`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ emoji }),
+  });
+
 // ── Upload ────────────────────────────────────────────
 export async function uploadImage(file) {
   const formData = new FormData();

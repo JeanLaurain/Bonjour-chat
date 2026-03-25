@@ -332,3 +332,51 @@ pub async fn remove_member(
         "message": "Member removed"
     })))
 }
+
+/// POST /groups/:id/messages/:msg_id/reactions — Toggle reaction on group message
+pub async fn toggle_group_reaction(
+    State(state): State<AppState>,
+    Path((group_id, message_id)): Path<(i32, i32)>,
+    req: Request,
+) -> Result<Json<Value>, AppError> {
+    let claims = extract_claims(&req, &state.jwt_secret)?;
+
+    // Verify user is member of the group
+    if !group::is_member(&state.db, group_id, claims.sub).await? {
+        return Err(AppError::Unauthorized);
+    }
+
+    let body = axum::body::to_bytes(req.into_body(), 1024)
+        .await
+        .map_err(|_| AppError::Validation("Invalid request body".into()))?;
+
+    #[derive(Deserialize)]
+    struct ReactionPayload {
+        emoji: String,
+    }
+
+    let payload: ReactionPayload = serde_json::from_slice(&body)
+        .map_err(|_| AppError::Validation("Invalid JSON".into()))?;
+
+    let reactions =
+        group::toggle_group_reaction(&state.db, message_id, claims.sub, &payload.emoji).await?;
+
+    // Broadcast to all group members
+    let member_ids = group::get_member_ids(&state.db, group_id).await?;
+    let ws_msg = json!({
+        "type": "reaction_updated",
+        "data": {
+            "message_id": message_id,
+            "context": "group",
+            "group_id": group_id,
+            "reactions": reactions,
+        }
+    })
+    .to_string();
+
+    for mid in &member_ids {
+        crate::handlers::ws::send_to_user(&state, *mid, &ws_msg).await;
+    }
+
+    Ok(Json(json!({ "reactions": reactions })))
+}
