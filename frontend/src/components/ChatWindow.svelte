@@ -338,84 +338,97 @@
                 </div>
               {/if}
 
-              <div id="msg-{item.id}" class="rounded-2xl px-4 py-2.5 {mine ? 'bg-primary-500 text-white rounded-br-md' : 'bg-slate-700 text-slate-100 rounded-bl-md'} shadow-sm transition-all">
-                {#if img}
-                  <!-- Message image -->
-                  <button on:click={() => lightboxSrc = img} class="block">
-                    <img src={img} alt="Image" class="max-w-full max-h-64 rounded-lg cursor-pointer hover:opacity-90 transition-opacity" loading="lazy" />
+              <!-- Bulle du message avec barre d'actions au hover -->
+              <div class="relative msg-wrapper">
+                <!-- Barre d'actions flottante (réagir + répondre) -->
+                <div class="msg-actions absolute {mine ? 'left-0 -translate-x-full pr-1' : 'right-0 translate-x-full pl-1'} top-1/2 -translate-y-1/2 flex flex-col gap-1 z-10">
+                  <!-- Bouton réaction -->
+                  <button
+                    on:click|stopPropagation={() => toggleEmojiPicker(item.id)}
+                    class="w-7 h-7 flex items-center justify-center rounded-full bg-slate-700/80 hover:bg-slate-600 text-slate-400 hover:text-yellow-300 transition-all shadow-lg backdrop-blur text-sm"
+                    title="Réagir"
+                  >
+                    😊
                   </button>
-                  {#if item.content && !isFilePath(item.content)}
-                    <p class="text-sm mt-2 break-words">{item.content}</p>
+                  <!-- Bouton répondre -->
+                  <button
+                    on:click={() => dispatch('reply', item)}
+                    class="w-7 h-7 flex items-center justify-center rounded-full bg-slate-700/80 hover:bg-slate-600 text-slate-400 hover:text-primary-400 transition-all shadow-lg backdrop-blur"
+                    title="Répondre"
+                  >
+                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/></svg>
+                  </button>
+                </div>
+
+                <div id="msg-{item.id}" class="rounded-2xl px-4 py-2.5 {mine ? 'bg-primary-500 text-white rounded-br-md' : 'bg-slate-700 text-slate-100 rounded-bl-md'} shadow-sm transition-all">
+                  {#if img}
+                    <!-- Message image -->
+                    <button on:click={() => lightboxSrc = img} class="block">
+                      <img src={img} alt="Image" class="max-w-full max-h-64 rounded-lg cursor-pointer hover:opacity-90 transition-opacity" loading="lazy" />
+                    </button>
+                    {#if item.content && !isFilePath(item.content)}
+                      <p class="text-sm mt-2 break-words">{item.content}</p>
+                    {/if}
+                  {:else if item.message_type === 'file'}
+                    <!-- Message fichier (non-image) -->
+                    <a href={item.image_url || item.content} target="_blank" rel="noopener"
+                       class="flex items-center gap-3 py-1 {mine ? 'text-white hover:text-primary-100' : 'text-slate-100 hover:text-primary-300'} transition-colors">
+                      <svg class="w-8 h-8 flex-shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                        <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                      </svg>
+                      <span class="text-sm underline truncate">{item.original_filename || 'Télécharger le fichier'}</span>
+                    </a>
+                    {#if item.content && !isFilePath(item.content)}
+                      <p class="text-sm mt-1 break-words">{item.content}</p>
+                    {/if}
+                  {:else}
+                    <!-- Message texte -->
+                    <p class="text-sm break-words whitespace-pre-wrap">{item.content}</p>
                   {/if}
-                {:else if item.message_type === 'file'}
-                  <!-- Message fichier (non-image) -->
-                  <a href={item.image_url || item.content} target="_blank" rel="noopener"
-                     class="flex items-center gap-3 py-1 {mine ? 'text-white hover:text-primary-100' : 'text-slate-100 hover:text-primary-300'} transition-colors">
-                    <svg class="w-8 h-8 flex-shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                      <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-                    </svg>
-                    <span class="text-sm underline truncate">{item.original_filename || 'Télécharger le fichier'}</span>
-                  </a>
-                  {#if item.content && !isFilePath(item.content)}
-                    <p class="text-sm mt-1 break-words">{item.content}</p>
-                  {/if}
-                {:else}
-                  <!-- Message texte -->
-                  <p class="text-sm break-words whitespace-pre-wrap">{item.content}</p>
+                  <p class="text-[10px] {mine ? 'text-primary-200' : 'text-slate-400'} mt-1 text-right">{formatTime(item.created_at)}</p>
+                </div>
+
+                <!-- Emoji picker (popup) -->
+                {#if emojiPickerMsgId === item.id}
+                  <div class="absolute {mine ? 'right-0' : 'left-0'} top-full mt-1 z-30">
+                    <div class="bg-slate-800 border border-slate-600/60 rounded-xl shadow-2xl p-2 flex flex-wrap gap-1 w-[220px] animate-fade-in">
+                      {#each reactionEmojis as emoji}
+                        <button
+                          on:click|stopPropagation={() => reactToMessage(item.id, emoji)}
+                          class="w-9 h-9 flex items-center justify-center rounded-lg hover:bg-slate-700 transition-all text-xl hover:scale-125 transform"
+                        >
+                          {emoji}
+                        </button>
+                      {/each}
+                    </div>
+                  </div>
                 {/if}
-                <p class="text-[10px] {mine ? 'text-primary-200' : 'text-slate-400'} mt-1 text-right">{formatTime(item.created_at)}</p>
               </div>
 
-              <!-- Réactions existantes + bouton ajouter -->
-              <div class="flex flex-wrap items-center gap-1 mt-1 {mine ? 'justify-end' : 'justify-start'} ml-1 mr-1">
-                {#if item.reactions?.length}
+              <!-- Réactions existantes sous la bulle -->
+              {#if item.reactions?.length}
+                <div class="flex flex-wrap items-center gap-1 mt-1 {mine ? 'justify-end' : 'justify-start'} mx-1">
                   {#each item.reactions as reaction}
                     <button
                       on:click={() => reactToMessage(item.id, reaction.emoji)}
-                      class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs transition-all
+                      class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs transition-all cursor-pointer
                         {hasMyReaction(reaction)
-                          ? 'bg-primary-500/30 border border-primary-500/60 text-primary-200'
+                          ? 'bg-primary-500/30 border border-primary-500/60 text-primary-200 hover:bg-primary-500/40'
                           : 'bg-slate-700/60 border border-slate-600/40 text-slate-300 hover:bg-slate-600/60'}"
-                      title={reaction.user_ids?.length + ' réaction(s)'}
+                      title="{reaction.user_ids?.length} réaction(s)"
                     >
-                      <span class="text-sm">{reaction.emoji}</span>
-                      <span class="text-[10px] font-medium">{reaction.user_ids?.length || 0}</span>
+                      <span class="text-sm leading-none">{reaction.emoji}</span>
+                      <span class="text-[10px] font-semibold">{reaction.user_ids?.length || 0}</span>
                     </button>
                   {/each}
-                {/if}
-
-                <!-- Bouton pour ouvrir l'emoji picker -->
-                <button
-                  on:click|stopPropagation={() => toggleEmojiPicker(item.id)}
-                  class="inline-flex items-center justify-center w-6 h-6 rounded-full text-slate-500 hover:text-slate-300 hover:bg-slate-700/50 transition-all text-sm opacity-0 group-hover:opacity-100 focus:opacity-100"
-                  class:opacity-100={emojiPickerMsgId === item.id || item.reactions?.length > 0}
-                  title="Ajouter une réaction"
-                >
-                  😊
-                </button>
-              </div>
-
-              <!-- Emoji picker (popup) -->
-              {#if emojiPickerMsgId === item.id}
-                <div class="relative {mine ? 'flex justify-end' : 'flex justify-start'}">
-                  <div class="absolute bottom-0 z-20 bg-slate-800 border border-slate-600/60 rounded-xl shadow-xl p-2 flex flex-wrap gap-1 max-w-[240px] animate-fade-in">
-                    {#each reactionEmojis as emoji}
-                      <button
-                        on:click|stopPropagation={() => reactToMessage(item.id, emoji)}
-                        class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-700 transition-colors text-lg hover:scale-110 transform"
-                      >
-                        {emoji}
-                      </button>
-                    {/each}
-                  </div>
+                  <!-- Bouton + pour ajouter une réaction depuis les pills -->
+                  <button
+                    on:click|stopPropagation={() => toggleEmojiPicker(item.id)}
+                    class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-slate-700/40 border border-slate-600/30 text-slate-500 hover:text-slate-300 hover:bg-slate-600/50 transition-all text-xs"
+                    title="Ajouter une réaction"
+                  >+</button>
                 </div>
               {/if}
-
-              <!-- Bouton répondre (clic long / desktop) -->
-              <button
-                on:click={() => dispatch('reply', item)}
-                class="ml-3 mt-0.5 text-[11px] text-slate-500 hover:text-primary-400 transition-colors hidden md:inline-block"
-              >↩ Répondre</button>
             </div>
           </div>
         {/if}
@@ -448,3 +461,16 @@
     </button>
   </button>
 {/if}
+
+<!-- Styles pour la barre d'actions message -->
+<style>
+  .msg-actions {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease;
+  }
+  .msg-wrapper:hover .msg-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+</style>
